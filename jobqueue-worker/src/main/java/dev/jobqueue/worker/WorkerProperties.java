@@ -18,6 +18,8 @@ import java.util.UUID;
  * @param lease           how long a claimed job stays reserved for this worker
  * @param pollInterval    first wait after an empty poll
  * @param maxPollInterval upper bound of the wait; it doubles from pollInterval while polls stay empty
+ * @param retryBaseDelay  wait before the first retry of a failed job (doubles with each further attempt)
+ * @param retryMaxDelay   upper bound of the wait between retries
  */
 @ConfigurationProperties("jobqueue.worker")
 public record WorkerProperties(
@@ -26,7 +28,9 @@ public record WorkerProperties(
         @DefaultValue("4") int slots,
         @DefaultValue("30s") Duration lease,
         @DefaultValue("500ms") Duration pollInterval,
-        @DefaultValue("5s") Duration maxPollInterval) {
+        @DefaultValue("5s") Duration maxPollInterval,
+        @DefaultValue("2s") Duration retryBaseDelay,
+        @DefaultValue("5m") Duration retryMaxDelay) {
 
     public WorkerProperties {
         if (workerId == null || workerId.isBlank()) {
@@ -43,6 +47,10 @@ public record WorkerProperties(
         }
         if (maxPollInterval.compareTo(pollInterval) < 0) {
             throw new IllegalArgumentException("jobqueue.worker.max-poll-interval must be >= poll-interval");
+        }
+        if (retryBaseDelay.isNegative() || retryBaseDelay.isZero() || retryMaxDelay.compareTo(retryBaseDelay) < 0) {
+            throw new IllegalArgumentException(
+                    "jobqueue.worker.retry-base-delay must be positive and <= retry-max-delay");
         }
     }
 

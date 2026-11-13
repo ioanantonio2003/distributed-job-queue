@@ -93,7 +93,8 @@ class CoreEndToEndIntegrationTest extends PostgresIntegrationTest {
         long startNanos = System.nanoTime();
         for (int i = 1; i <= WORKERS; i++) {
             WorkerProperties properties = new WorkerProperties("e2e-worker-" + i, List.of(QUEUE), SLOTS_PER_WORKER,
-                    Duration.ofSeconds(60), Duration.ofMillis(20), Duration.ofMillis(100));
+                    Duration.ofSeconds(60), Duration.ofMillis(20), Duration.ofMillis(100),
+                    Duration.ofSeconds(1), Duration.ofSeconds(5));
             JobPoller poller = new JobPoller(new JobClaimRepository(jdbc), new JobCompletionRepository(jdbc),
                     registry, properties);
             pollers.add(poller);

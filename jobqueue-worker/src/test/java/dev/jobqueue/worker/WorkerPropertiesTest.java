@@ -11,7 +11,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class WorkerPropertiesTest {
 
     private static WorkerProperties with(String workerId, int slots, Duration poll, Duration maxPoll) {
-        return new WorkerProperties(workerId, List.of("default"), slots, Duration.ofSeconds(30), poll, maxPoll);
+        return new WorkerProperties(workerId, List.of("default"), slots, Duration.ofSeconds(30), poll, maxPoll,
+                Duration.ofSeconds(2), Duration.ofMinutes(5));
+    }
+
+    @Test
+    void shouldRejectRetryMaxDelayBelowRetryBaseDelay() {
+        assertThatThrownBy(() -> new WorkerProperties("w", List.of("default"), 4, Duration.ofSeconds(30),
+                Duration.ofMillis(500), Duration.ofSeconds(5), Duration.ofMinutes(1), Duration.ofSeconds(1)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("retry-base-delay");
     }
 
     @Test
@@ -46,7 +55,7 @@ class WorkerPropertiesTest {
     @Test
     void shouldRejectEmptyQueueList() {
         assertThatThrownBy(() -> new WorkerProperties("w", List.of(), 4, Duration.ofSeconds(30),
-                Duration.ofMillis(500), Duration.ofSeconds(5)))
+                Duration.ofMillis(500), Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofMinutes(5)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("queues");
     }

@@ -1,12 +1,15 @@
 package dev.jobqueue.worker.completion;
 
+import dev.jobqueue.common.JobStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
+import java.time.Duration;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
- * Records the successful end of a job attempt.
+ * Records the end of a job attempt, successful or failed.
  *
  * <p>Invariant (fencing): only the worker that currently holds the lease can finish the job. The lease is
  * identified by (locked_by, attempts) while the status is RUNNING; a worker that lost the job, for example
@@ -47,5 +50,48 @@ public class JobCompletionRepository {
                 .param("attempt", attempt)
                 .update();
         return rows == 1;
+    }
+
+    /**
+     * Records that the attempt failed, in one statement and under the same fencing check as {@link #complete}.
+     * The job goes to DEAD if the failure is permanent or its attempts are used up; otherwise back to QUEUED,
+     * to be claimed again once {@code delay} has passed (run_at, on the database clock).
+     *
+     * @return the job's new status (QUEUED or DEAD), or empty if the lease was lost and nothing was changed
+     */
+    public Optional<JobStatus> fail(UUID jobId, String workerId, int attempt, String error,
+            boolean permanent, Duration delay) {
+        // "recorded" is a data-modifying CTE that nothing selects from: PostgreSQL still runs it exactly once and
+        // to completion, so the job update and the history row are atomic. The final SELECT only reports the
+        // new status; it returns no row when the fenced UPDATE matched nothing.
+        return jdbc.sql("""
+                        WITH failed AS (
+                            UPDATE jobs
+                            SET status = CASE WHEN (:permanent OR attempts >= max_attempts) THEN 'DEAD' ELSE 'QUEUED' END,
+                                run_at = now() + :delaySeconds * interval '1 second',
+                                last_error = :error,
+                                locked_by = NULL,
+                                locked_until = NULL,
+                                -- Only a finished job has a finish time; a job waiting for a retry has not finished.
+                                finished_at = CASE WHEN (:permanent OR attempts >= max_attempts) THEN now() END
+                            -- The fencing check, identical to complete().
+                            WHERE id = :jobId AND locked_by = :workerId AND attempts = :attempt AND status = 'RUNNING'
+                            RETURNING id, attempts, started_at, status
+                        ),
+                        recorded AS (
+                            INSERT INTO job_attempts (job_id, attempt, worker_id, started_at, finished_at, outcome, error)
+                            SELECT id, attempts, :workerId, started_at, now(), 'FAILED', :error FROM failed
+                        )
+                        SELECT status FROM failed
+                        """)
+                .param("jobId", jobId)
+                .param("workerId", workerId)
+                .param("attempt", attempt)
+                .param("error", error)
+                .param("permanent", permanent)
+                .param("delaySeconds", delay.toMillis() / 1000.0)
+                .query(String.class)
+                .optional()
+                .map(JobStatus::valueOf);
     }
 }

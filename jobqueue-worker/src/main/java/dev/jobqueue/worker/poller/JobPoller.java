@@ -1,6 +1,9 @@
 package dev.jobqueue.worker.poller;
 
+import dev.jobqueue.common.BackoffCalculator;
 import dev.jobqueue.common.JobContext;
+import dev.jobqueue.common.JobStatus;
+import dev.jobqueue.common.PermanentFailureException;
 import dev.jobqueue.worker.WorkerProperties;
 import dev.jobqueue.worker.claim.ClaimedJob;
 import dev.jobqueue.worker.claim.JobClaimRepository;
@@ -13,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Semaphore;
 
 /**
@@ -34,6 +38,7 @@ public class JobPoller implements SmartLifecycle {
     private final JobCompletionRepository completionRepository;
     private final HandlerRegistry registry;
     private final WorkerProperties properties;
+    private final BackoffCalculator backoff;
     private final Semaphore slots;
 
     private volatile boolean running;
@@ -45,6 +50,7 @@ public class JobPoller implements SmartLifecycle {
         this.completionRepository = completionRepository;
         this.registry = registry;
         this.properties = properties;
+        this.backoff = new BackoffCalculator(properties.retryBaseDelay(), properties.retryMaxDelay());
         this.slots = new Semaphore(properties.slots());
     }
 
@@ -135,12 +141,42 @@ public class JobPoller implements SmartLifecycle {
         JobContext context = new JobContext(job.id(), job.queue(), job.type(), job.attempt(), job.idempotencyKey());
         try {
             registry.invoke(context, job.payload());
+        } catch (PermanentFailureException e) {
+            fail(job, e, true);
+            return;
         } catch (Exception e) {
-            log.warn("Job {} ({}) handler failed; it stays RUNNING until failure handling is implemented",
-                    job.id(), job.type(), e);
+            // Everything else is assumed to be transient, including an unknown job type (another worker
+            // may have the handler) and a handler interrupted by shutdown: retry, until the attempts run out.
+            fail(job, e, false);
             return;
         }
         complete(job);
+    }
+
+    private void fail(ClaimedJob job, Exception cause, boolean permanent) {
+        Duration delay = permanent ? Duration.ZERO : backoff.delay(job.attempt());
+        try {
+            Optional<JobStatus> status = completionRepository.fail(job.id(), properties.workerId(), job.attempt(),
+                    describe(cause), permanent, delay);
+            if (status.isEmpty()) {
+                log.warn("Job {} ({}) lease lost: failure of attempt {} ignored", job.id(), job.type(), job.attempt());
+            } else if (status.get() == JobStatus.DEAD) {
+                log.warn("Job {} ({}) is DEAD after attempt {}: {}", job.id(), job.type(), job.attempt(),
+                        describe(cause));
+            } else {
+                log.info("Job {} ({}) failed on attempt {}, retry in {}: {}", job.id(), job.type(), job.attempt(),
+                        delay, describe(cause));
+            }
+        } catch (RuntimeException e) {
+            // The job stays RUNNING; when its lease expires it will be recovered (reaper, later step).
+            log.error("Could not record failure of job {}", job.id(), e);
+        }
+    }
+
+    // What goes into jobs.last_error: the exception type and message, truncated so one huge message cannot bloat a row.
+    private static String describe(Exception e) {
+        String text = e.getClass().getSimpleName() + ": " + e.getMessage();
+        return text.length() <= 2000 ? text : text.substring(0, 2000);
     }
 
     // The handler is already finished here, so this is a separate short statement: no connection or

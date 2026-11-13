@@ -74,7 +74,8 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
         spring.refresh();
 
         WorkerProperties properties = new WorkerProperties("test-worker", List.of(queue), slots,
-                Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(200));
+                Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(200),
+                Duration.ofMillis(50), Duration.ofMillis(200));
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties);
         poller.start();
@@ -82,8 +83,12 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
     }
 
     private void insertJobs(String queue, String type, int count) {
-        JDBC.sql("INSERT INTO jobs (queue, type) SELECT :q, :t FROM generate_series(1, :n)")
-                .param("q", queue).param("t", type).param("n", count).update();
+        insertJobs(queue, type, count, 5);
+    }
+
+    private void insertJobs(String queue, String type, int count, int maxAttempts) {
+        JDBC.sql("INSERT INTO jobs (queue, type, max_attempts) SELECT :q, :t, :m FROM generate_series(1, :n)")
+                .param("q", queue).param("t", type).param("m", maxAttempts).param("n", count).update();
     }
 
     private int countByStatus(String queue, String status) {
@@ -130,8 +135,9 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
 
     @Test
     void shouldKeepWorkingAndFreeTheSlotWhenHandlerFailsOrTypeIsUnknown() {
-        insertJobs("poll-fail", "fail", 1);
-        insertJobs("poll-fail", "no-such-type", 1);
+        // max_attempts = 1: the first failure is final, so the failed jobs end up DEAD instead of being retried.
+        insertJobs("poll-fail", "fail", 1, 1);
+        insertJobs("poll-fail", "no-such-type", 1, 1);
         insertJobs("poll-fail", "record", 1);
 
         // One slot: if a failed job leaked its slot, the "record" job could never run.
@@ -139,8 +145,8 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
 
         await().atMost(Duration.ofSeconds(10)).until(() -> countByStatus("poll-fail", "SUCCEEDED") == 1);
         assertThat(poller.isRunning()).isTrue();
-        // Failed jobs are not completed (failure handling is a later step): they stay RUNNING.
-        assertThat(countByStatus("poll-fail", "RUNNING")).isEqualTo(2);
+        await().atMost(Duration.ofSeconds(10)).until(() -> countByStatus("poll-fail", "DEAD") == 2);
+        assertThat(countByStatus("poll-fail", "RUNNING")).isZero();
     }
 
     @Test

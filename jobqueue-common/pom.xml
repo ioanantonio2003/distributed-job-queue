@@ -13,4 +13,18 @@
     <artifactId>jobqueue-common</artifactId>
     <name>jobqueue-common</name>
     <description>Shared types: enums, handler API, exceptions, backoff, Flyway migrations</description>
+
+    <!-- Plain unit tests only: this module has no Spring or database dependency. -->
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>
