@@ -4,6 +4,13 @@ server:
 spring:
   application:
     name: jobqueue-worker
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/jobqueue}
+    username: ${DB_USER:jobqueue}
+    password: ${DB_PASSWORD:jobqueue}
+  # Only the server migrates the schema.
+  flyway:
+    enabled: false
 
 management:
   endpoints:
