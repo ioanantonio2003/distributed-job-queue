@@ -6,5 +6,7 @@ package dev.jobqueue.common;
 public enum AttemptOutcome {
     SUCCEEDED,
     FAILED,
-    TIMED_OUT
+    TIMED_OUT,
+    /** The worker stopped heartbeating (it died or was cut off) and the reaper took the job back. */
+    LEASE_EXPIRED
 }
