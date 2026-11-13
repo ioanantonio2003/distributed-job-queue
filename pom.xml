@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- The Spring Boot parent brings the dependency BOM (managed versions) and plugin defaults. -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.2</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>dev.jobqueue</groupId>
+    <artifactId>jobqueue-parent</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>jobqueue-parent</name>
+    <description>Distributed job queue backed by PostgreSQL (FOR UPDATE SKIP LOCKED)</description>
+
+    <modules>
+        <module>jobqueue-common</module>
+        <module>jobqueue-server</module>
+        <module>jobqueue-worker</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Lets server and worker depend on common without repeating the version. -->
+            <dependency>
+                <groupId>dev.jobqueue</groupId>
+                <artifactId>jobqueue-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+</project>

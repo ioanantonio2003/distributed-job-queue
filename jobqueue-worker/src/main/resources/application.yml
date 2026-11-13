@@ -1,0 +1,12 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: jobqueue-worker
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

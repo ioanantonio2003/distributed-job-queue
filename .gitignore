@@ -1,0 +1,35 @@
+# Local working documents (NOT published)
+CLAUDE.md
+STEPS.md
+docs/learning/
+.claude/
+
+# IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Maven / Java
+target/
+HELP.md
+*.class
+*.log
+logs/
+hs_err_pid*
+
+# Secrets and local data
+.env
+*.pem
+*.key
+docker/data/
+docker/pgdata/
+
+# Raw benchmark / chaos results
+scripts/benchmark/out/
+scripts/chaos/out/
+
+# OS
+.DS_Store
+Thumbs.db
