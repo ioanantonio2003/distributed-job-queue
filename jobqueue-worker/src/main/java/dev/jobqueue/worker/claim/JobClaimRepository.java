@@ -4,7 +4,10 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -13,6 +16,9 @@ import java.util.UUID;
  * <p>Invariant: a job is claimed by at most one worker at a time. It holds because the pick and the update
  * happen in one statement, and {@code FOR UPDATE SKIP LOCKED} makes concurrent claimers skip rows that another
  * claimer has already locked instead of waiting for them or taking them too.
+ *
+ * <p>It also extends leases (heartbeat), under the same fencing rule as every other write by a worker:
+ * only the worker that holds the lease for the current attempt can extend it.
  *
  * <p>No {@code @Transactional}: the statement is its own short transaction, so no lock or connection is
  * held while a handler runs.
@@ -24,6 +30,40 @@ public class JobClaimRepository {
 
     public JobClaimRepository(JdbcClient jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /**
+     * Extends the lease of the given jobs by {@code lease} from now, in one statement.
+     *
+     * @return the ids whose lease was extended; every other id was lost (taken by another worker, re-claimed
+     *         for a later attempt, or no longer RUNNING) and must not be touched by this worker any more
+     */
+    public Set<UUID> extendLeases(String workerId, Map<UUID, Integer> attemptsById, Duration lease) {
+        if (attemptsById.isEmpty()) {
+            return Set.of();
+        }
+        UUID[] ids = attemptsById.keySet().toArray(new UUID[0]);
+        Integer[] attempts = new Integer[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            attempts[i] = attemptsById.get(ids[i]);
+        }
+        return new HashSet<>(jdbc.sql("""
+                        UPDATE jobs j
+                        SET locked_until = now() + :leaseSeconds * interval '1 second'
+                        -- unnest turns the two arrays into rows (id, attempt): one UPDATE covers every running job.
+                        FROM unnest(CAST(:ids AS uuid[]), CAST(:attempts AS int[])) AS t(id, attempt)
+                        -- Fencing: the job must still be ours (locked_by, status) AND still be the attempt
+                        -- we started (attempts). Anything else matches no row and is reported as lost.
+                        WHERE j.id = t.id AND j.attempts = t.attempt
+                          AND j.locked_by = :workerId AND j.status = 'RUNNING'
+                        RETURNING j.id
+                        """)
+                .param("leaseSeconds", lease.toSeconds())
+                .param("ids", ids)
+                .param("attempts", attempts)
+                .param("workerId", workerId)
+                .query(UUID.class)
+                .list());
     }
 
     /**

@@ -7,6 +7,7 @@ import dev.jobqueue.common.JobHandler;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.heartbeat.RunningJobs;
 import dev.jobqueue.worker.poller.JobPoller;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -94,9 +95,9 @@ class CoreEndToEndIntegrationTest extends PostgresIntegrationTest {
         for (int i = 1; i <= WORKERS; i++) {
             WorkerProperties properties = new WorkerProperties("e2e-worker-" + i, List.of(QUEUE), SLOTS_PER_WORKER,
                     Duration.ofSeconds(60), Duration.ofMillis(20), Duration.ofMillis(100),
-                    Duration.ofSeconds(1), Duration.ofSeconds(5));
+                    Duration.ofSeconds(1), Duration.ofSeconds(5), null);
             JobPoller poller = new JobPoller(new JobClaimRepository(jdbc), new JobCompletionRepository(jdbc),
-                    registry, properties);
+                    registry, properties, new RunningJobs());
             pollers.add(poller);
             poller.start();
         }

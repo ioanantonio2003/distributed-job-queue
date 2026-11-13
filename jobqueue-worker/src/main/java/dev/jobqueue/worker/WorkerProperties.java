@@ -20,6 +20,7 @@ import java.util.UUID;
  * @param maxPollInterval upper bound of the wait; it doubles from pollInterval while polls stay empty
  * @param retryBaseDelay  wait before the first retry of a failed job (doubles with each further attempt)
  * @param retryMaxDelay   upper bound of the wait between retries
+ * @param heartbeatInterval how often the lease of running jobs is extended; a third of the lease when absent
  */
 @ConfigurationProperties("jobqueue.worker")
 public record WorkerProperties(
@@ -30,7 +31,8 @@ public record WorkerProperties(
         @DefaultValue("500ms") Duration pollInterval,
         @DefaultValue("5s") Duration maxPollInterval,
         @DefaultValue("2s") Duration retryBaseDelay,
-        @DefaultValue("5m") Duration retryMaxDelay) {
+        @DefaultValue("5m") Duration retryMaxDelay,
+        Duration heartbeatInterval) {
 
     public WorkerProperties {
         if (workerId == null || workerId.isBlank()) {
@@ -51,6 +53,18 @@ public record WorkerProperties(
         if (retryBaseDelay.isNegative() || retryBaseDelay.isZero() || retryMaxDelay.compareTo(retryBaseDelay) < 0) {
             throw new IllegalArgumentException(
                     "jobqueue.worker.retry-base-delay must be positive and <= retry-max-delay");
+        }
+        if (heartbeatInterval == null) {
+            heartbeatInterval = lease.dividedBy(3);
+        }
+        if (heartbeatInterval.isNegative() || heartbeatInterval.isZero()) {
+            throw new IllegalArgumentException("jobqueue.worker.heartbeat-interval must be positive");
+        }
+        // Invariant 5: with at least three heartbeats per lease, one or two late or failed heartbeats
+        // do not make a healthy worker lose its jobs.
+        if (lease.compareTo(heartbeatInterval.multipliedBy(3)) < 0) {
+            throw new IllegalArgumentException("jobqueue.worker.lease (" + lease + ") must be at least 3 x "
+                    + "jobqueue.worker.heartbeat-interval (" + heartbeatInterval + ")");
         }
     }
 

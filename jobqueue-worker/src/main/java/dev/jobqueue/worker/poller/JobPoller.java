@@ -10,6 +10,7 @@ import dev.jobqueue.worker.claim.ClaimedJob;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.heartbeat.RunningJobs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
@@ -45,6 +47,7 @@ public class JobPoller implements SmartLifecycle {
     private final JobCompletionRepository completionRepository;
     private final HandlerRegistry registry;
     private final WorkerProperties properties;
+    private final RunningJobs runningJobs;
     private final BackoffCalculator backoff;
     private final Semaphore slots;
 
@@ -52,11 +55,12 @@ public class JobPoller implements SmartLifecycle {
     private Thread pollerThread;
 
     public JobPoller(JobClaimRepository claimRepository, JobCompletionRepository completionRepository,
-            HandlerRegistry registry, WorkerProperties properties) {
+            HandlerRegistry registry, WorkerProperties properties, RunningJobs runningJobs) {
         this.claimRepository = claimRepository;
         this.completionRepository = completionRepository;
         this.registry = registry;
         this.properties = properties;
+        this.runningJobs = runningJobs;
         this.backoff = new BackoffCalculator(properties.retryBaseDelay(), properties.retryMaxDelay());
         this.slots = new Semaphore(properties.slots());
     }
@@ -151,7 +155,17 @@ public class JobPoller implements SmartLifecycle {
             registry.invoke(context, job.payload());
             return null;
         });
-        Thread.ofVirtual().name("handler-" + job.id()).start(handler);
+        // Visible to the heartbeat (which extends the lease and can cancel the handler) until execution ends.
+        runningJobs.add(job, handler);
+        try {
+            Thread.ofVirtual().name("handler-" + job.id()).start(handler);
+            awaitOutcome(job, handler);
+        } finally {
+            runningJobs.remove(job.id());
+        }
+    }
+
+    private void awaitOutcome(ClaimedJob job, FutureTask<Void> handler) {
         try {
             handler.get(job.timeoutSeconds(), TimeUnit.SECONDS);
         } catch (TimeoutException e) {
@@ -175,6 +189,12 @@ public class JobPoller implements SmartLifecycle {
             } else {
                 throw new IllegalStateException(cause);
             }
+            return;
+        } catch (CancellationException e) {
+            // Only the heartbeat cancels a handler from outside: it found the job is no longer ours.
+            // Nothing is written; the new owner of the job (or the reaper) decides what happens to it.
+            log.warn("Job {} ({}) lease lost: attempt {} was cancelled and its result is ignored",
+                    job.id(), job.type(), job.attempt());
             return;
         } catch (InterruptedException e) {
             // Not expected (nothing interrupts this thread); leave the job RUNNING for the lease to recover.

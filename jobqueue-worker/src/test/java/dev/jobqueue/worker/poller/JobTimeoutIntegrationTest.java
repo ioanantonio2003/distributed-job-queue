@@ -8,6 +8,7 @@ import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.demo.FailureDemoHandlers;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.heartbeat.RunningJobs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -85,9 +86,9 @@ class JobTimeoutIntegrationTest extends PostgresIntegrationTest {
         spring.refresh();
         WorkerProperties properties = new WorkerProperties("timeout-worker", List.of(queue), slots,
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(100),
-                Duration.ofMillis(100), Duration.ofSeconds(1));
+                Duration.ofMillis(100), Duration.ofSeconds(1), null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
-                spring.getBean(HandlerRegistry.class), properties);
+                spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
         poller.start();
     }
 

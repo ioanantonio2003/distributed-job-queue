@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -147,6 +148,66 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
                         """)
                 .query(Integer.class).single();
         assertThat(notExactlyOnce).isZero();
+    }
+
+    /** Inserts one job in a fresh queue and claims it as {@code worker} with a short 5 s lease. */
+    private ClaimedJob claimWithShortLease(String worker) {
+        String queue = "extend-" + UUID.randomUUID();
+        insert(queue, "t", 0, "now()");
+        return repository.claim(worker, List.of(queue), Duration.ofSeconds(5), 1).getFirst();
+    }
+
+    /** True if the job's lease ends more than {@code seconds} from now. */
+    private boolean leaseEndsAfter(UUID id, int seconds) {
+        return JDBC.sql("SELECT locked_until > now() + :s * interval '1 second' FROM jobs WHERE id = :id")
+                .param("s", seconds).param("id", id).query(Boolean.class).single();
+    }
+
+    @Test
+    void shouldExtendTheLeaseWhenTheWorkerStillHoldsTheJob() {
+        ClaimedJob job = claimWithShortLease("w1");
+        assertThat(leaseEndsAfter(job.id(), 10)).isFalse(); // 5 s lease
+
+        Set<UUID> kept = repository.extendLeases("w1", Map.of(job.id(), job.attempt()), Duration.ofSeconds(60));
+
+        assertThat(kept).containsExactly(job.id());
+        assertThat(leaseEndsAfter(job.id(), 55)).isTrue();
+    }
+
+    @Test
+    void shouldReportAsLostEveryJobThatIsNoLongerHeldWhenExtendingSeveralAtOnce() {
+        ClaimedJob mine = claimWithShortLease("w1");
+        ClaimedJob stolen = claimWithShortLease("w1");
+        ClaimedJob reclaimed = claimWithShortLease("w1");
+        ClaimedJob requeued = claimWithShortLease("w1");
+        JDBC.sql("UPDATE jobs SET locked_by = 'thief' WHERE id = :id").param("id", stolen.id()).update();
+        JDBC.sql("UPDATE jobs SET attempts = 2 WHERE id = :id").param("id", reclaimed.id()).update();
+        JDBC.sql("UPDATE jobs SET status = 'QUEUED', locked_by = NULL WHERE id = :id").param("id", requeued.id()).update();
+
+        Set<UUID> kept = repository.extendLeases("w1", Map.of(
+                mine.id(), 1, stolen.id(), 1, reclaimed.id(), 1, requeued.id(), 1), Duration.ofSeconds(60));
+
+        assertThat(kept).containsExactly(mine.id());
+        assertThat(leaseEndsAfter(mine.id(), 55)).isTrue();
+        // The lost ones were left exactly as they were.
+        assertThat(leaseEndsAfter(stolen.id(), 10)).isFalse();
+        assertThat(leaseEndsAfter(reclaimed.id(), 10)).isFalse();
+        assertThat(leaseEndsAfter(requeued.id(), 10)).isFalse();
+    }
+
+    @Test
+    void shouldNotExtendWhenAnotherWorkerAsks() {
+        ClaimedJob job = claimWithShortLease("w1");
+
+        Set<UUID> kept = repository.extendLeases("w2", Map.of(job.id(), job.attempt()), Duration.ofSeconds(60));
+
+        assertThat(kept).isEmpty();
+        assertThat(leaseEndsAfter(job.id(), 10)).isFalse();
+    }
+
+    @Test
+    void shouldReturnNothingWhenThereAreNoJobsToExtend() {
+        assertThat(repository.extendLeases("w1", Map.of(), Duration.ofSeconds(60))).isEmpty();
     }
 
     private UUID insert(String queue, String type, int priority, String runAtSql) {
