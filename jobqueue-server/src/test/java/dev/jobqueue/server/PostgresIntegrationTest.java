@@ -1,6 +1,7 @@
 package dev.jobqueue.server;
 
 import org.flywaydb.core.Flyway;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -21,6 +22,7 @@ public abstract class PostgresIntegrationTest {
 
     protected static final DataSource DATA_SOURCE;
     protected static final JdbcClient JDBC;
+    protected static final JdbcTemplate JDBC_TEMPLATE;
 
     static {
         POSTGRES.start();
@@ -29,5 +31,6 @@ public abstract class PostgresIntegrationTest {
         // The same migrations the server applies at startup, so tests see the real schema.
         Flyway.configure().dataSource(DATA_SOURCE).locations("classpath:db/migration").load().migrate();
         JDBC = JdbcClient.create(DATA_SOURCE);
+        JDBC_TEMPLATE = new JdbcTemplate(DATA_SOURCE);
     }
 }

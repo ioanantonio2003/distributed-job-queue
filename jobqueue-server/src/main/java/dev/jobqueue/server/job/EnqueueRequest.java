@@ -16,7 +16,8 @@ public record EnqueueRequest(
         JsonNode payload,
         Integer priority,
         @Min(1) @Max(50) Integer maxAttempts,
-        @Min(1) Integer timeoutSeconds) {
+        @Min(1) Integer timeoutSeconds,
+        @Size(min = 1, max = 200) String idempotencyKey) {
 
     public EnqueueRequest {
         priority = priority == null ? 0 : priority;

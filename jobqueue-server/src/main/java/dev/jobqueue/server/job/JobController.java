@@ -1,11 +1,13 @@
 package dev.jobqueue.server.job;
 
 import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
@@ -24,12 +26,22 @@ public class JobController {
         this.service = service;
     }
 
+    /**
+     * 201 when a job was created, 200 when the idempotency key matched an existing job (same body either way).
+     */
     @PostMapping("/jobs")
     public ResponseEntity<JobResponse> enqueue(@Valid @RequestBody EnqueueRequest request) {
-        JobResponse created = service.enqueue(request);
+        EnqueueResult result = service.enqueue(request);
         URI location = ServletUriComponentsBuilder.fromCurrentRequest()
-                .path("/{id}").buildAndExpand(created.id()).toUri();
-        return ResponseEntity.created(location).body(created);
+                .path("/{id}").buildAndExpand(result.job().id()).toUri();
+        HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
+        return ResponseEntity.status(status).location(location).body(result.job());
+    }
+
+    @PostMapping("/jobs/batch")
+    @ResponseStatus(HttpStatus.CREATED)
+    public BatchEnqueueResponse enqueueBatch(@Valid @RequestBody BatchEnqueueRequest request) {
+        return service.enqueueBatch(request);
     }
 
     @GetMapping("/jobs/{id}")

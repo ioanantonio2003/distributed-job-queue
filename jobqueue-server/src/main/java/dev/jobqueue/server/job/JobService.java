@@ -1,10 +1,13 @@
 package dev.jobqueue.server.job;
 
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -26,16 +29,43 @@ public class JobService {
         this.objectMapper = objectMapper;
     }
 
-    public JobResponse enqueue(EnqueueRequest request) {
-        String payloadJson = serializePayload(request.payload());
-        NewJob newJob = new NewJob(request.queue(), request.type(), payloadJson, request.priority(),
-                request.maxAttempts(), request.timeoutSeconds(), null);
-        UUID id = repository.insert(newJob);
-        return get(id);
+    public EnqueueResult enqueue(EnqueueRequest request) {
+        Optional<UUID> id = repository.insert(toNewJob(request));
+        if (id.isPresent()) {
+            return new EnqueueResult(get(id.get()), true);
+        }
+        // Empty means the idempotency key already exists: return the job that got there first.
+        // The insert waited for any concurrent in-flight insert of the same key to finish, and this SELECT
+        // is a new statement (READ COMMITTED), so it sees that committed row.
+        Job existing = repository.findByIdempotencyKey(request.queue(), request.idempotencyKey())
+                .orElseThrow(() -> new IllegalStateException("Idempotent job vanished after conflict"));
+        return new EnqueueResult(toResponse(existing), false);
+    }
+
+    /**
+     * All-or-nothing: if any insert fails, none of the jobs is stored.
+     */
+    @Transactional
+    public BatchEnqueueResponse enqueueBatch(BatchEnqueueRequest request) {
+        // Silently ignoring a key would break the caller's expectation of "no duplicates", so refuse it.
+        if (request.jobs().stream().anyMatch(job -> job.idempotencyKey() != null)) {
+            throw new InvalidJobException("idempotencyKey is not supported in batch requests");
+        }
+        List<NewJob> newJobs = request.jobs().stream().map(this::toNewJob).toList();
+        return new BatchEnqueueResponse(repository.insertBatch(newJobs));
     }
 
     public JobResponse get(UUID id) {
         Job job = repository.findById(id).orElseThrow(() -> new JobNotFoundException(id));
+        return toResponse(job);
+    }
+
+    private NewJob toNewJob(EnqueueRequest request) {
+        return new NewJob(request.queue(), request.type(), serializePayload(request.payload()),
+                request.priority(), request.maxAttempts(), request.timeoutSeconds(), request.idempotencyKey());
+    }
+
+    private JobResponse toResponse(Job job) {
         return JobResponse.from(job, objectMapper.readTree(job.payload()));
     }
 

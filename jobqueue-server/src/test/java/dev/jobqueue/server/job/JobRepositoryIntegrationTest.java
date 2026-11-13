@@ -3,23 +3,22 @@ package dev.jobqueue.server.job;
 import dev.jobqueue.common.JobStatus;
 import dev.jobqueue.server.PostgresIntegrationTest;
 import org.junit.jupiter.api.Test;
-import org.springframework.dao.DuplicateKeyException;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class JobRepositoryIntegrationTest extends PostgresIntegrationTest {
 
-    private final JobRepository repository = new JobRepository(JDBC);
+    private final JobRepository repository = new JobRepository(JDBC_TEMPLATE);
 
     @Test
     void shouldReturnInsertedJobWhenFindingById() {
         NewJob newJob = new NewJob("emails", "send-welcome", "{\"to\":\"a@b.c\"}", 3, 7, 30, "welcome-1");
 
-        UUID id = repository.insert(newJob);
+        UUID id = repository.insert(newJob).orElseThrow();
         Job job = repository.findById(id).orElseThrow();
 
         assertThat(job.id()).isEqualTo(id);
@@ -34,7 +33,7 @@ class JobRepositoryIntegrationTest extends PostgresIntegrationTest {
 
     @Test
     void shouldSetDatabaseDefaultsWhenInserting() {
-        UUID id = repository.insert(new NewJob("defaults", "demo", "{}", 0, 5, 60, null));
+        UUID id = repository.insert(new NewJob("defaults", "demo", "{}", 0, 5, 60, null)).orElseThrow();
 
         Job job = repository.findById(id).orElseThrow();
 
@@ -57,10 +56,36 @@ class JobRepositoryIntegrationTest extends PostgresIntegrationTest {
     }
 
     @Test
-    void shouldRejectInsertWhenIdempotencyKeyAlreadyUsedInQueue() {
-        repository.insert(new NewJob("repo-idem", "demo", "{}", 0, 5, 60, "same-key"));
+    void shouldReturnEmptyWhenIdempotencyKeyAlreadyUsedInQueue() {
+        UUID first = repository.insert(new NewJob("repo-idem", "demo", "{}", 0, 5, 60, "same-key")).orElseThrow();
 
-        assertThatThrownBy(() -> repository.insert(new NewJob("repo-idem", "demo", "{}", 0, 5, 60, "same-key")))
-                .isInstanceOf(DuplicateKeyException.class);
+        Optional<UUID> second = repository.insert(new NewJob("repo-idem", "demo", "{}", 0, 5, 60, "same-key"));
+
+        assertThat(second).isEmpty();
+        assertThat(repository.findByIdempotencyKey("repo-idem", "same-key")).get()
+                .extracting(Job::id).isEqualTo(first);
+    }
+
+    @Test
+    void shouldInsertWhenSameIdempotencyKeyIsUsedInAnotherQueue() {
+        repository.insert(new NewJob("repo-idem-a", "demo", "{}", 0, 5, 60, "k")).orElseThrow();
+
+        Optional<UUID> other = repository.insert(new NewJob("repo-idem-b", "demo", "{}", 0, 5, 60, "k"));
+
+        assertThat(other).isPresent();
+    }
+
+    @Test
+    void shouldInsertEveryJobWhenInsertingBatch() {
+        List<NewJob> jobs = List.of(
+                new NewJob("repo-batch", "a", "{\"n\":1}", 1, 5, 60, null),
+                new NewJob("repo-batch", "b", "{\"n\":2}", 2, 5, 60, null),
+                new NewJob("repo-batch", "c", "{\"n\":3}", 3, 5, 60, null));
+
+        List<UUID> ids = repository.insertBatch(jobs);
+
+        assertThat(ids).hasSize(3).doesNotHaveDuplicates();
+        assertThat(ids.stream().map(id -> repository.findById(id).orElseThrow().type()).toList())
+                .containsExactly("a", "b", "c");
     }
 }
