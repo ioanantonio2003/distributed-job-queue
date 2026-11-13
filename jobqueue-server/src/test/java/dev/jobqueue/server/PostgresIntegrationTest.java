@@ -16,7 +16,8 @@ import javax.sql.DataSource;
  */
 public abstract class PostgresIntegrationTest {
 
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17");
+    // protected so Spring-based tests can point the application's datasource at this container.
+    protected static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:17");
 
     protected static final DataSource DATA_SOURCE;
     protected static final JdbcClient JDBC;
