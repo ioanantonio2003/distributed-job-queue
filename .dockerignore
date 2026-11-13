@@ -1,0 +1,12 @@
+# Keep the build context small and free of local-only files.
+**/target
+.git
+.idea
+.claude
+docs
+docker
+scripts
+CLAUDE.md
+STEPS.md
+.env
+*.log

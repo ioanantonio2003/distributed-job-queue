@@ -1,0 +1,5 @@
+# Files that run on Linux (inside containers or Git Bash) must keep LF endings even when
+# core.autocrlf=true converts the rest of the working tree to CRLF on Windows.
+mvnw text eol=lf
+.mvn/wrapper/maven-wrapper.properties text eol=lf
+*.sh text eol=lf
