@@ -5,6 +5,7 @@ import dev.jobqueue.common.JobHandler;
 import dev.jobqueue.worker.PostgresIntegrationTest;
 import dev.jobqueue.worker.WorkerProperties;
 import dev.jobqueue.worker.claim.JobClaimRepository;
+import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -74,7 +75,8 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
 
         WorkerProperties properties = new WorkerProperties("test-worker", List.of(queue), slots,
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(200));
-        poller = new JobPoller(new JobClaimRepository(JDBC), spring.getBean(HandlerRegistry.class), properties);
+        poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
+                spring.getBean(HandlerRegistry.class), properties);
         poller.start();
         return poller;
     }
@@ -90,15 +92,19 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
     }
 
     @Test
-    void shouldRunHandlerForEveryQueuedJobWhenPollerIsRunning() {
+    void shouldRunHandlerAndMarkSucceededForEveryQueuedJobWhenPollerIsRunning() {
         insertJobs("poll-all", "record", 3);
 
         startPoller("poll-all", 2);
 
-        await().atMost(Duration.ofSeconds(10)).until(() -> handlers.handled.size() == 3);
-        assertThat(handlers.handled).doesNotHaveDuplicates();
-        // Completion is Step 10: until then every executed job stays RUNNING with attempts = 1.
-        assertThat(countByStatus("poll-all", "RUNNING")).isEqualTo(3);
+        await().atMost(Duration.ofSeconds(10)).until(() -> countByStatus("poll-all", "SUCCEEDED") == 3);
+        assertThat(handlers.handled).hasSize(3).doesNotHaveDuplicates();
+        Integer attemptRows = JDBC.sql("""
+                        SELECT count(*) FROM job_attempts a JOIN jobs j ON j.id = a.job_id
+                        WHERE j.queue = 'poll-all' AND a.outcome = 'SUCCEEDED' AND a.attempt = 1
+                        """)
+                .query(Integer.class).single();
+        assertThat(attemptRows).isEqualTo(3);
     }
 
     @Test
@@ -118,7 +124,7 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
         handlers.gate.countDown();
 
         // Freed slots are reused until all 10 are done, never exceeding 3 at once.
-        await().atMost(Duration.ofSeconds(10)).until(() -> handlers.handled.size() == 10);
+        await().atMost(Duration.ofSeconds(10)).until(() -> countByStatus("poll-slots", "SUCCEEDED") == 10);
         assertThat(handlers.maxRunning.get()).isEqualTo(3);
     }
 
@@ -131,8 +137,31 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
         // One slot: if a failed job leaked its slot, the "record" job could never run.
         startPoller("poll-fail", 1);
 
-        await().atMost(Duration.ofSeconds(10)).until(() -> handlers.handled.size() == 1);
+        await().atMost(Duration.ofSeconds(10)).until(() -> countByStatus("poll-fail", "SUCCEEDED") == 1);
         assertThat(poller.isRunning()).isTrue();
+        // Failed jobs are not completed (failure handling is a later step): they stay RUNNING.
+        assertThat(countByStatus("poll-fail", "RUNNING")).isEqualTo(2);
+    }
+
+    @Test
+    void shouldIgnoreTheResultWhenTheJobWasTakenAwayWhileTheHandlerRan() {
+        handlers.gate = new CountDownLatch(1);
+        insertJobs("poll-stolen", "record", 1);
+        startPoller("poll-stolen", 1);
+        await().atMost(Duration.ofSeconds(10)).until(() -> handlers.running.get() == 1);
+
+        // Another worker "steals" the job (as after a lease expiry) while our handler is still running.
+        JDBC.sql("UPDATE jobs SET locked_by = 'thief', attempts = attempts + 1 WHERE queue = 'poll-stolen'").update();
+        handlers.gate.countDown();
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> handlers.handled.size() == 1);
+        // The handler finished, but its completion was fenced out: the job is still the thief's.
+        await().during(Duration.ofMillis(500)).atMost(Duration.ofSeconds(10)).until(() ->
+                countByStatus("poll-stolen", "RUNNING") == 1);
+        Integer attemptRows = JDBC.sql("""
+                        SELECT count(*) FROM job_attempts a JOIN jobs j ON j.id = a.job_id WHERE j.queue = 'poll-stolen'
+                        """).query(Integer.class).single();
+        assertThat(attemptRows).isZero();
     }
 
     @Test

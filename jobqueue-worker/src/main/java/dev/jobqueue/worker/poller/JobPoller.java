@@ -4,6 +4,7 @@ import dev.jobqueue.common.JobContext;
 import dev.jobqueue.worker.WorkerProperties;
 import dev.jobqueue.worker.claim.ClaimedJob;
 import dev.jobqueue.worker.claim.JobClaimRepository;
+import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +31,7 @@ public class JobPoller implements SmartLifecycle {
     private static final Logger log = LoggerFactory.getLogger(JobPoller.class);
 
     private final JobClaimRepository claimRepository;
+    private final JobCompletionRepository completionRepository;
     private final HandlerRegistry registry;
     private final WorkerProperties properties;
     private final Semaphore slots;
@@ -37,8 +39,10 @@ public class JobPoller implements SmartLifecycle {
     private volatile boolean running;
     private Thread pollerThread;
 
-    public JobPoller(JobClaimRepository claimRepository, HandlerRegistry registry, WorkerProperties properties) {
+    public JobPoller(JobClaimRepository claimRepository, JobCompletionRepository completionRepository,
+            HandlerRegistry registry, WorkerProperties properties) {
         this.claimRepository = claimRepository;
+        this.completionRepository = completionRepository;
         this.registry = registry;
         this.properties = properties;
         this.slots = new Semaphore(properties.slots());
@@ -131,11 +135,27 @@ public class JobPoller implements SmartLifecycle {
         JobContext context = new JobContext(job.id(), job.queue(), job.type(), job.attempt(), job.idempotencyKey());
         try {
             registry.invoke(context, job.payload());
-            log.info("Job {} ({}) handler finished; it stays RUNNING until completion is implemented (Step 10)",
-                    job.id(), job.type());
         } catch (Exception e) {
             log.warn("Job {} ({}) handler failed; it stays RUNNING until failure handling is implemented",
                     job.id(), job.type(), e);
+            return;
+        }
+        complete(job);
+    }
+
+    // The handler is already finished here, so this is a separate short statement: no connection or
+    // transaction was held while the handler ran.
+    private void complete(ClaimedJob job) {
+        try {
+            if (completionRepository.complete(job.id(), properties.workerId(), job.attempt())) {
+                log.info("Job {} ({}) succeeded on attempt {}", job.id(), job.type(), job.attempt());
+            } else {
+                // Fenced out: another worker owns the job now (or it was already finished). Our result is ignored.
+                log.warn("Job {} ({}) lease lost: result of attempt {} ignored", job.id(), job.type(), job.attempt());
+            }
+        } catch (RuntimeException e) {
+            // The job stays RUNNING; when its lease expires it will be recovered (reaper, later step).
+            log.error("Could not record completion of job {}", job.id(), e);
         }
     }
 

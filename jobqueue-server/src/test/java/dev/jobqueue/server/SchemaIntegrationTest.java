@@ -25,6 +25,25 @@ class SchemaIntegrationTest extends PostgresIntegrationTest {
     }
 
     @Test
+    void shouldCreateJobAttemptsTableWithUniqueAttemptPerJobWhenMigrated() {
+        List<String> columns = JDBC.sql("""
+                        SELECT column_name FROM information_schema.columns WHERE table_name = 'job_attempts'
+                        """)
+                .query(String.class).list();
+        UUID jobId = JDBC.sql("INSERT INTO jobs (queue, type) VALUES ('attempts-schema', 'demo') RETURNING id")
+                .query(UUID.class).single();
+        JDBC.sql("INSERT INTO job_attempts (job_id, attempt, worker_id, started_at) VALUES (:id, 1, 'w', now())")
+                .param("id", jobId).update();
+        var duplicate = JDBC.sql(
+                "INSERT INTO job_attempts (job_id, attempt, worker_id, started_at) VALUES (:id, 1, 'w', now())")
+                .param("id", jobId);
+
+        assertThat(columns).containsExactlyInAnyOrder(
+                "id", "job_id", "attempt", "worker_id", "started_at", "finished_at", "outcome", "error");
+        assertThatThrownBy(duplicate::update).hasMessageContaining("job_attempts_job_id_attempt_key");
+    }
+
+    @Test
     void shouldCreateTheThreePartialIndexesWhenMigrated() {
         List<String> indexes = JDBC.sql("SELECT indexname FROM pg_indexes WHERE tablename = 'jobs'")
                 .query(String.class).list();
