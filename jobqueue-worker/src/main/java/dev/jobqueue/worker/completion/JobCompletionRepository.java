@@ -1,5 +1,6 @@
 package dev.jobqueue.worker.completion;
 
+import dev.jobqueue.common.AttemptOutcome;
 import dev.jobqueue.common.JobStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
@@ -56,11 +57,12 @@ public class JobCompletionRepository {
      * Records that the attempt failed, in one statement and under the same fencing check as {@link #complete}.
      * The job goes to DEAD if the failure is permanent or its attempts are used up; otherwise back to QUEUED,
      * to be claimed again once {@code delay} has passed (run_at, on the database clock).
+     * {@code outcome} is what job_attempts records: FAILED for an exception, TIMED_OUT for a time limit.
      *
      * @return the job's new status (QUEUED or DEAD), or empty if the lease was lost and nothing was changed
      */
     public Optional<JobStatus> fail(UUID jobId, String workerId, int attempt, String error,
-            boolean permanent, Duration delay) {
+            boolean permanent, Duration delay, AttemptOutcome outcome) {
         // "recorded" is a data-modifying CTE that nothing selects from: PostgreSQL still runs it exactly once and
         // to completion, so the job update and the history row are atomic. The final SELECT only reports the
         // new status; it returns no row when the fenced UPDATE matched nothing.
@@ -80,7 +82,7 @@ public class JobCompletionRepository {
                         ),
                         recorded AS (
                             INSERT INTO job_attempts (job_id, attempt, worker_id, started_at, finished_at, outcome, error)
-                            SELECT id, attempts, :workerId, started_at, now(), 'FAILED', :error FROM failed
+                            SELECT id, attempts, :workerId, started_at, now(), :outcome, :error FROM failed
                         )
                         SELECT status FROM failed
                         """)
@@ -90,6 +92,7 @@ public class JobCompletionRepository {
                 .param("error", error)
                 .param("permanent", permanent)
                 .param("delaySeconds", delay.toMillis() / 1000.0)
+                .param("outcome", outcome.name())
                 .query(String.class)
                 .optional()
                 .map(JobStatus::valueOf);

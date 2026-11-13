@@ -1,5 +1,6 @@
 package dev.jobqueue.worker.poller;
 
+import dev.jobqueue.common.AttemptOutcome;
 import dev.jobqueue.common.BackoffCalculator;
 import dev.jobqueue.common.JobContext;
 import dev.jobqueue.common.JobStatus;
@@ -17,14 +18,20 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Claims jobs and runs their handlers, never more at once than {@code slots}.
  *
- * <p>Invariants: (1) the number of running handlers never exceeds the slot count, because a permit is taken
- * before a job is claimed and returned only when its handler ends; (2) a handler runs on its own virtual
- * thread, after the claim statement has finished, so it holds no database connection or transaction.
+ * <p>Invariants: (1) the number of jobs being executed never exceeds the slot count, because a permit is taken
+ * before a job is claimed and returned only when its execution ends, by completion, failure or timeout;
+ * (2) a handler runs on its own virtual thread, after the claim statement has finished, so it holds no
+ * database connection or transaction. Caveat to (1): after a timeout the slot is freed even if the handler
+ * ignored the interrupt and is still running in the background (Java cannot kill a thread).
  *
  * <p>Only the poller thread takes permits; handler threads only give them back. That is what makes
  * "take everything that is free, then claim that many" safe without extra locking.
@@ -139,25 +146,51 @@ public class JobPoller implements SmartLifecycle {
 
     private void execute(ClaimedJob job) {
         JobContext context = new JobContext(job.id(), job.queue(), job.type(), job.attempt(), job.idempotencyKey());
-        try {
+        // The handler runs on a second virtual thread so this one can wait for it with a time limit.
+        FutureTask<Void> handler = new FutureTask<>(() -> {
             registry.invoke(context, job.payload());
-        } catch (PermanentFailureException e) {
-            fail(job, e, true);
+            return null;
+        });
+        Thread.ofVirtual().name("handler-" + job.id()).start(handler);
+        try {
+            handler.get(job.timeoutSeconds(), TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            // cancel(true) only *asks* the handler thread to stop, by interrupting it. Code that blocks (sleep, I/O,
+            // locks) or checks its interrupt flag stops; a busy loop that ignores it keeps running unseen.
+            // Either way this job's slot is freed: a stuck handler must not hold it forever.
+            handler.cancel(true);
+            fail(job, new TimeoutException("handler exceeded timeout of " + job.timeoutSeconds() + " s"),
+                    false, AttemptOutcome.TIMED_OUT);
             return;
-        } catch (Exception e) {
-            // Everything else is assumed to be transient, including an unknown job type (another worker
-            // may have the handler) and a handler interrupted by shutdown: retry, until the attempts run out.
-            fail(job, e, false);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof PermanentFailureException permanent) {
+                fail(job, permanent, true, AttemptOutcome.FAILED);
+            } else if (cause instanceof Exception exception) {
+                // Everything else is assumed to be transient, including an unknown job type (another worker
+                // may have the handler): retry, until the attempts run out.
+                fail(job, exception, false, AttemptOutcome.FAILED);
+            } else if (cause instanceof Error error) {
+                throw error; // an Error is not hidden: this thread dies and the job stays RUNNING until recovered
+            } else {
+                throw new IllegalStateException(cause);
+            }
+            return;
+        } catch (InterruptedException e) {
+            // Not expected (nothing interrupts this thread); leave the job RUNNING for the lease to recover.
+            handler.cancel(true);
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while waiting for job {}; it is left RUNNING", job.id());
             return;
         }
         complete(job);
     }
 
-    private void fail(ClaimedJob job, Exception cause, boolean permanent) {
+    private void fail(ClaimedJob job, Exception cause, boolean permanent, AttemptOutcome outcome) {
         Duration delay = permanent ? Duration.ZERO : backoff.delay(job.attempt());
         try {
             Optional<JobStatus> status = completionRepository.fail(job.id(), properties.workerId(), job.attempt(),
-                    describe(cause), permanent, delay);
+                    describe(cause), permanent, delay, outcome);
             if (status.isEmpty()) {
                 log.warn("Job {} ({}) lease lost: failure of attempt {} ignored", job.id(), job.type(), job.attempt());
             } else if (status.get() == JobStatus.DEAD) {

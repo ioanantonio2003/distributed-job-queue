@@ -4,9 +4,12 @@ import dev.jobqueue.common.JobContext;
 import dev.jobqueue.common.JobHandler;
 import dev.jobqueue.common.PermanentFailureException;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.JsonNode;
+
+import java.time.Duration;
 
 /**
- * Demo handlers that fail on purpose, to show retries and the dead-letter state.
+ * Demo handlers that fail on purpose, to show retries, timeouts and the dead-letter state.
  * Neither keeps any state: "flaky" decides from the attempt number the worker passes in.
  */
 @Component
@@ -25,6 +28,12 @@ public class FailureDemoHandlers {
         if (context.attempt() <= payload.failTimes()) {
             throw new IllegalStateException("flaky failure on attempt " + context.attempt());
         }
+    }
+
+    /** Blocks for an hour, far beyond any job timeout; stops at once when interrupted, as well-behaved code does. */
+    @JobHandler("hang")
+    public void hang(JobContext context, JsonNode payload) throws InterruptedException {
+        Thread.sleep(Duration.ofHours(1));
     }
 
     /** Fails every time; with {"permanent": true} the job goes straight to DEAD, otherwise it is retried. */
