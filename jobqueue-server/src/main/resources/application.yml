@@ -4,6 +4,12 @@ server:
 spring:
   application:
     name: jobqueue-server
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/jobqueue}
+    username: ${DB_USER:jobqueue}
+    password: ${DB_PASSWORD:jobqueue}
+  flyway:
+    enabled: true
 
 management:
   endpoints:
