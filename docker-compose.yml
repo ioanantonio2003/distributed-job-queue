@@ -25,6 +25,9 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-jobqueue}
       DB_USER: ${POSTGRES_USER:-jobqueue}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-jobqueue}
+      # Pass-through from the shell (used by scripts/chaos): when the variable is not set, nothing is passed
+      # and the application default applies.
+      JOBQUEUE_REAPER_INTERVAL:
     ports:
       - "8080:8080"
     depends_on:
@@ -49,6 +52,10 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-jobqueue}
       DB_USER: ${POSTGRES_USER:-jobqueue}
       DB_PASSWORD: ${POSTGRES_PASSWORD:-jobqueue}
+      # Pass-through from the shell (used by scripts/chaos); unset means the application default.
+      JOBQUEUE_WORKER_QUEUES:
+      JOBQUEUE_WORKER_LEASE:
+      JOBQUEUE_WORKER_SLOTS:
     depends_on:
       # Waiting for the server means the schema has been migrated before any worker starts claiming.
       server:
