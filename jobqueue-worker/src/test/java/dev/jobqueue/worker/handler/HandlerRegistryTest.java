@@ -4,6 +4,7 @@ import dev.jobqueue.common.JobContext;
 import dev.jobqueue.common.JobHandler;
 import dev.jobqueue.common.PermanentFailureException;
 import dev.jobqueue.worker.demo.EchoHandler;
+import dev.jobqueue.worker.demo.NoopHandler;
 import dev.jobqueue.worker.demo.SleepHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -131,10 +132,11 @@ class HandlerRegistryTest {
 
     @Test
     void shouldRunDemoHandlersWhenTheyAreRegistered() throws Exception {
-        try (var spring = startContext(EchoHandler.class, SleepHandler.class)) {
+        try (var spring = startContext(EchoHandler.class, SleepHandler.class, NoopHandler.class)) {
             HandlerRegistry registry = spring.getBean(HandlerRegistry.class);
 
             registry.invoke(context("echo", 1), "{\"hello\":\"world\"}");
+            registry.invoke(context("noop", 1), "{}");
             registry.invoke(context("sleep", 1), "{\"millis\":1}");
 
             assertThatThrownBy(() -> registry.invoke(context("sleep", 1), "{\"millis\":-5}"))
