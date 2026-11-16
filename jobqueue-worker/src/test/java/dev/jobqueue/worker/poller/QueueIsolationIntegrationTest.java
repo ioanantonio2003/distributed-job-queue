@@ -97,7 +97,7 @@ class QueueIsolationIntegrationTest extends PostgresIntegrationTest {
         // No "queues" list and a default of 1 slot: the queues and their concurrency come from the map alone.
         WorkerProperties properties = new WorkerProperties("iso-worker", List.of(), 1, Duration.ofSeconds(30),
                 pollInterval, maxPollInterval, Duration.ofMillis(100), Duration.ofSeconds(1),
-                null, concurrency);
+                null, concurrency, null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
         poller.start();

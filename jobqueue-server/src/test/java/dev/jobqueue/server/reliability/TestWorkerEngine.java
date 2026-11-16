@@ -58,7 +58,7 @@ final class TestWorkerEngine {
 
         WorkerProperties properties = new WorkerProperties(workerId, List.of(queue), slots, lease,
                 Duration.ofMillis(20), Duration.ofMillis(100), Duration.ofMillis(100), Duration.ofSeconds(1),
-                lease.dividedBy(3), null);
+                lease.dividedBy(3), null, Duration.ZERO);
         JobClaimRepository claimRepository = new JobClaimRepository(jdbc);
         // Remembers what happened to every completion this worker attempted, to show a zombie being rejected.
         JobCompletionRepository completionRepository = new JobCompletionRepository(jdbc) {

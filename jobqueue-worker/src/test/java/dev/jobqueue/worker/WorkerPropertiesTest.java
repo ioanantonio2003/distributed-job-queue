@@ -13,13 +13,13 @@ class WorkerPropertiesTest {
 
     private static WorkerProperties with(String workerId, int slots, Duration poll, Duration maxPoll) {
         return new WorkerProperties(workerId, List.of("default"), slots, Duration.ofSeconds(30), poll, maxPoll,
-                Duration.ofSeconds(2), Duration.ofMinutes(5), null, null);
+                Duration.ofSeconds(2), Duration.ofMinutes(5), null, null, null);
     }
 
     @Test
     void shouldRejectRetryMaxDelayBelowRetryBaseDelay() {
         assertThatThrownBy(() -> new WorkerProperties("w", List.of("default"), 4, Duration.ofSeconds(30),
-                Duration.ofMillis(500), Duration.ofSeconds(5), Duration.ofMinutes(1), Duration.ofSeconds(1), null, null))
+                Duration.ofMillis(500), Duration.ofSeconds(5), Duration.ofMinutes(1), Duration.ofSeconds(1), null, null, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("retry-base-delay");
     }
@@ -55,7 +55,7 @@ class WorkerPropertiesTest {
 
     private static WorkerProperties withQueues(List<String> queues, int slots, Map<String, Integer> concurrency) {
         return new WorkerProperties("w", queues, slots, Duration.ofSeconds(30), Duration.ofMillis(500),
-                Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofMinutes(5), null, concurrency);
+                Duration.ofSeconds(5), Duration.ofSeconds(2), Duration.ofMinutes(5), null, concurrency, null);
     }
 
     @Test
@@ -93,7 +93,7 @@ class WorkerPropertiesTest {
 
     private static WorkerProperties withLeaseAndHeartbeat(Duration lease, Duration heartbeat) {
         return new WorkerProperties("w", List.of("default"), 4, lease, Duration.ofMillis(500), Duration.ofSeconds(5),
-                Duration.ofSeconds(2), Duration.ofMinutes(5), heartbeat, null);
+                Duration.ofSeconds(2), Duration.ofMinutes(5), heartbeat, null, null);
     }
 
     @Test

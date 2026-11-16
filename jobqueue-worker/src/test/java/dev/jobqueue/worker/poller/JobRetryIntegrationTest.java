@@ -48,7 +48,7 @@ class JobRetryIntegrationTest extends PostgresIntegrationTest {
         spring.refresh();
         WorkerProperties properties = new WorkerProperties("retry-worker", List.of(queue), 2,
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(100),
-                RETRY_BASE, Duration.ofSeconds(5), null, null);
+                RETRY_BASE, Duration.ofSeconds(5), null, null, null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
         poller.start();

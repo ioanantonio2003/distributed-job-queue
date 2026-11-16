@@ -27,6 +27,9 @@ import java.util.UUID;
  * @param heartbeatInterval how often the lease of running jobs is extended; a third of the lease when absent
  * @param concurrency     queue name to number of concurrent handlers, overriding {@code slots} for that queue
  *                        (for example {@code emails: 4, reports: 2}); a queue named only here is served too
+ * @param shutdownGrace   on shutdown, how long to wait for running jobs to finish before giving the rest back
+ *                        to the queue; zero gives them back at once. Keep it below Spring's
+ *                        {@code spring.lifecycle.timeout-per-shutdown-phase} and the container's stop timeout.
  */
 @ConfigurationProperties("jobqueue.worker")
 public record WorkerProperties(
@@ -39,9 +42,16 @@ public record WorkerProperties(
         @DefaultValue("2s") Duration retryBaseDelay,
         @DefaultValue("5m") Duration retryMaxDelay,
         Duration heartbeatInterval,
-        Map<String, Integer> concurrency) {
+        Map<String, Integer> concurrency,
+        @DefaultValue("20s") Duration shutdownGrace) {
 
     public WorkerProperties {
+        if (shutdownGrace == null) {
+            shutdownGrace = Duration.ofSeconds(20);
+        }
+        if (shutdownGrace.isNegative()) {
+            throw new IllegalArgumentException("jobqueue.worker.shutdown-grace must not be negative");
+        }
         if (workerId == null || workerId.isBlank()) {
             workerId = defaultWorkerId();
         }

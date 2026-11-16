@@ -66,6 +66,16 @@ public class HeartbeatService implements SmartLifecycle {
     }
 
     /**
+     * Lower than the poller's phase: Spring starts lower phases first and stops them last. So the heartbeat is
+     * already running when the poller starts, and is still running while the poller drains on shutdown, which
+     * keeps the leases of the jobs that are still finishing alive.
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE - 100;
+    }
+
+    /**
      * One heartbeat: extend every running job's lease, then cancel the handlers of the jobs that were lost.
      * Never throws: with scheduleWithFixedDelay an exception would silently cancel all later heartbeats.
      */

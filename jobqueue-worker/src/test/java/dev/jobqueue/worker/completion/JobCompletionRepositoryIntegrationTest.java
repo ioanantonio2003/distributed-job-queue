@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -128,5 +129,71 @@ class JobCompletionRepositoryIntegrationTest extends PostgresIntegrationTest {
     @Test
     void shouldReturnFalseWhenJobDoesNotExist() {
         assertThat(completionRepository.complete(UUID.randomUUID(), "w1", 1)).isFalse();
+    }
+
+    // ---- release: giving jobs back on a graceful shutdown ------------------------------------------------------
+
+    @Test
+    void shouldGiveTheJobBackWithoutUsingAnAttemptWhenTheWorkerStillHoldsIt() {
+        ClaimedJob job = claimedBy("w1"); // attempts 0 -> 1
+        assertThat(snapshot(job.id())).startsWith("RUNNING|w1|1|");
+
+        int released = completionRepository.release("w1", Map.of(job.id(), job.attempt()));
+
+        assertThat(released).isEqualTo(1);
+        assertThat(snapshot(job.id())).isEqualTo("QUEUED|-|0|true"); // attempts back to 0, not finished
+        assertThat(attemptRows(job.id())).as("no history row for the unfinished attempt").isZero();
+        // Claimed again, it is attempt 1 once more: the released attempt was never counted.
+        String queue = JDBC.sql("SELECT queue FROM jobs WHERE id = :id").param("id", job.id())
+                .query(String.class).single();
+        assertThat(claimRepository.claim("w2", queue, Duration.ofSeconds(30), 1))
+                .singleElement().satisfies(again -> assertThat(again.attempt()).isEqualTo(1));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @ValueSource(strings = {
+            "UPDATE jobs SET locked_by = 'thief' WHERE id = :id",
+            "UPDATE jobs SET attempts = 2 WHERE id = :id",
+            "UPDATE jobs SET status = 'QUEUED', locked_by = NULL, locked_until = NULL WHERE id = :id",
+            "UPDATE jobs SET status = 'DEAD', locked_by = NULL, locked_until = NULL WHERE id = :id"})
+    void shouldLeaveTheJobAloneWhenItIsNotHeldByThisWorkerAnyMore(String takeAwaySql) {
+        ClaimedJob job = claimedBy("w1");
+        JDBC.sql(takeAwaySql).param("id", job.id()).update();
+        String before = snapshot(job.id());
+
+        int released = completionRepository.release("w1", Map.of(job.id(), job.attempt()));
+
+        assertThat(released).isZero();
+        assertThat(snapshot(job.id())).isEqualTo(before);
+    }
+
+    @Test
+    void shouldNotReleaseAJobHeldByAnotherWorker() {
+        ClaimedJob job = claimedBy("w1");
+
+        int released = completionRepository.release("w2", Map.of(job.id(), job.attempt()));
+
+        assertThat(released).isZero();
+        assertThat(snapshot(job.id())).startsWith("RUNNING|w1|1|");
+    }
+
+    @Test
+    void shouldReleaseOnlyTheGivenJobsWhenSeveralAreRunning() {
+        ClaimedJob first = claimedBy("w1");
+        ClaimedJob second = claimedBy("w1");
+        ClaimedJob untouched = claimedBy("w1");
+
+        int released = completionRepository.release("w1",
+                Map.of(first.id(), first.attempt(), second.id(), second.attempt()));
+
+        assertThat(released).isEqualTo(2);
+        assertThat(snapshot(first.id())).startsWith("QUEUED|");
+        assertThat(snapshot(second.id())).startsWith("QUEUED|");
+        assertThat(snapshot(untouched.id())).startsWith("RUNNING|w1|1|");
+    }
+
+    @Test
+    void shouldReleaseNothingWhenThereAreNoJobs() {
+        assertThat(completionRepository.release("w1", Map.of())).isZero();
     }
 }

@@ -1,9 +1,16 @@
 server:
   port: 8081
+  # On SIGTERM the web server stops accepting requests but lets running ones finish.
+  shutdown: graceful
 
 spring:
   application:
     name: jobqueue-worker
+  lifecycle:
+    # How long Spring waits for the components of one shutdown phase to stop. The worker's poller drains running
+    # jobs in its phase, for up to jobqueue.worker.shutdown-grace (20 s by default): this must be larger.
+    # The container's stop_grace_period (docker-compose.yml) must in turn be larger than this.
+    timeout-per-shutdown-phase: 40s
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/jobqueue}
     username: ${DB_USER:jobqueue}

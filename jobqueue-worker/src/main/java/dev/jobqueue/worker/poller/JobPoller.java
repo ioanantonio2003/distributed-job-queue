@@ -17,8 +17,11 @@ import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -60,6 +63,8 @@ public class JobPoller implements SmartLifecycle {
     }
 
     private volatile boolean running;
+    // Set when a shutdown begins; only changes how an interrupted handler is logged.
+    private volatile boolean shuttingDown;
     private Thread pollerThread;
 
     public JobPoller(JobClaimRepository claimRepository, JobCompletionRepository completionRepository,
@@ -87,24 +92,76 @@ public class JobPoller implements SmartLifecycle {
                 properties.workerId(), properties.queueSlots(), properties.lease());
     }
 
-    // Does not wait for running handlers: a graceful drain is a later step.
+    /**
+     * Graceful shutdown, in two steps. DRAINING: stop claiming and let the running jobs finish, for at most the
+     * shutdown grace. Then, for whatever is still unfinished: interrupt its handler and give the job back to the
+     * queue without costing it an attempt.
+     *
+     * <p>Blocks until both steps are done (Spring waits for it, up to spring.lifecycle.timeout-per-shutdown-phase).
+     */
     @Override
     public synchronized void stop() {
-        running = false;
-        if (pollerThread != null) {
-            pollerThread.interrupt();
-            try {
-                pollerThread.join(5_000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        if (pollerThread == null) {
+            return; // never started, or already stopped
+        }
+        shuttingDown = true;
+        running = false; // DRAINING: the poll loop claims nothing more
+        pollerThread.interrupt();
+        try {
+            pollerThread.join(5_000); // after this, nobody can claim a job any more, so the set below only shrinks
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        pollerThread = null;
+        drain();
+    }
+
+    private void drain() {
+        try {
+            if (!runningJobs.snapshot().isEmpty()) {
+                log.info("Draining: waiting up to {} for {} running job(s) to finish",
+                        properties.shutdownGrace(), runningJobs.snapshot().size());
             }
-            pollerThread = null;
+            if (runningJobs.awaitEmpty(properties.shutdownGrace())) {
+                log.info("Drained: every running job finished");
+                return;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt(); // stop waiting; give back what is left right away
+        }
+
+        // The grace period is over. Take the unfinished jobs off the books first (so the heartbeat stops caring
+        // about them), then interrupt their handlers, then give the jobs back to the queue.
+        List<RunningJobs.Entry> unfinished = runningJobs.snapshot();
+        Map<UUID, Integer> attemptsById = new HashMap<>();
+        for (RunningJobs.Entry entry : unfinished) {
+            attemptsById.put(entry.job().id(), entry.job().attempt());
+            runningJobs.remove(entry.job().id());
+        }
+        unfinished.forEach(entry -> entry.handler().cancel(true));
+        try {
+            int released = completionRepository.release(properties.workerId(), attemptsById);
+            log.warn("Grace period over: {} of {} unfinished job(s) given back to the queue, without using an attempt",
+                    released, unfinished.size());
+        } catch (RuntimeException e) {
+            // Not fatal: the leases run out and the reaper recovers the jobs (those do cost an attempt).
+            log.error("Could not give {} unfinished job(s) back to the queue; the reaper will recover them",
+                    unfinished.size(), e);
         }
     }
 
     @Override
     public boolean isRunning() {
         return running;
+    }
+
+    /**
+     * Stops first, so that the heartbeat (which has a lower phase) is still alive while this one drains
+     * and the leases of the jobs still running keep being extended. Spring stops higher phases first.
+     */
+    @Override
+    public int getPhase() {
+        return Integer.MAX_VALUE;
     }
 
     private void pollLoop() {
@@ -152,31 +209,26 @@ public class JobPoller implements SmartLifecycle {
     }
 
     private void startHandler(ClaimedJob job, QueueSlots queue) {
-        Thread.ofVirtual().name("job-" + job.id()).start(() -> {
-            try {
-                execute(job);
-            } finally {
-                queue.permits().release();
-                wakeups.release(); // a slot is free: let the poller look at once, instead of at its next wait
-            }
-        });
-    }
-
-    private void execute(ClaimedJob job) {
         JobContext context = new JobContext(job.id(), job.queue(), job.type(), job.attempt(), job.idempotencyKey());
-        // The handler runs on a second virtual thread so this one can wait for it with a time limit.
         FutureTask<Void> handler = new FutureTask<>(() -> {
             registry.invoke(context, job.payload());
             return null;
         });
-        // Visible to the heartbeat (which extends the lease and can cancel the handler) until execution ends.
+        // Registered here, by the poller thread itself, the moment the job is claimed: from now on the heartbeat
+        // extends its lease and a shutdown knows about it, with no gap in which a claimed job is invisible.
         runningJobs.add(job, handler);
-        try {
-            Thread.ofVirtual().name("handler-" + job.id()).start(handler);
-            awaitOutcome(job, handler);
-        } finally {
-            runningJobs.remove(job.id());
-        }
+        Thread.ofVirtual().name("job-" + job.id()).start(() -> {
+            try {
+                // The handler runs on a second virtual thread so this one can wait for it with a time limit.
+                // If a shutdown cancelled it already, it simply does not run.
+                Thread.ofVirtual().name("handler-" + job.id()).start(handler);
+                awaitOutcome(job, handler);
+            } finally {
+                runningJobs.remove(job.id());
+                queue.permits().release();
+                wakeups.release(); // a slot is free: let the poller look at once, instead of at its next wait
+            }
+        });
     }
 
     private void awaitOutcome(ClaimedJob job, FutureTask<Void> handler) {
@@ -205,10 +257,16 @@ public class JobPoller implements SmartLifecycle {
             }
             return;
         } catch (CancellationException e) {
-            // Only the heartbeat cancels a handler from outside: it found the job is no longer ours.
-            // Nothing is written; the new owner of the job (or the reaper) decides what happens to it.
-            log.warn("Job {} ({}) lease lost: attempt {} was cancelled and its result is ignored",
-                    job.id(), job.type(), job.attempt());
+            // A handler is cancelled from outside in two cases. Either way nothing is written here.
+            if (shuttingDown) {
+                // The grace period ran out: the shutdown is giving this job back to the queue itself.
+                log.info("Job {} ({}) interrupted by the worker shutdown; it is given back to the queue",
+                        job.id(), job.type());
+            } else {
+                // The heartbeat found the job is no longer ours: its new owner (or the reaper) decides.
+                log.warn("Job {} ({}) lease lost: attempt {} was cancelled and its result is ignored",
+                        job.id(), job.type(), job.attempt());
+            }
             return;
         } catch (InterruptedException e) {
             // Not expected (nothing interrupts this thread); leave the job RUNNING for the lease to recover.

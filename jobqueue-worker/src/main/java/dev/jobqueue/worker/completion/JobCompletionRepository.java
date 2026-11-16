@@ -6,6 +6,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -23,6 +24,45 @@ public class JobCompletionRepository {
 
     public JobCompletionRepository(JdbcClient jdbc) {
         this.jdbc = jdbc;
+    }
+
+    /**
+     * Gives unfinished jobs back to the queue when this worker shuts down, without costing them an attempt.
+     * One statement, under the same fencing check as every other write: only jobs this worker still holds
+     * (same worker, same attempt, still RUNNING) are released; anything else is left as it is.
+     *
+     * <p>{@code attempts} goes back down by one, as if the claim had never happened: the worker leaves because it
+     * was asked to, not because the job went wrong. No job_attempts row is written: that attempt did not happen
+     * as far as the job is concerned, and its number will be used again by the next claim (a row would collide
+     * with UNIQUE (job_id, attempt)). A crash is different and cannot do this: the attempt stays counted.
+     *
+     * @return how many jobs were released
+     */
+    public int release(String workerId, Map<UUID, Integer> attemptsById) {
+        if (attemptsById.isEmpty()) {
+            return 0;
+        }
+        UUID[] ids = attemptsById.keySet().toArray(new UUID[0]);
+        Integer[] attempts = new Integer[ids.length];
+        for (int i = 0; i < ids.length; i++) {
+            attempts[i] = attemptsById.get(ids[i]);
+        }
+        return jdbc.sql("""
+                        UPDATE jobs j
+                        SET status = 'QUEUED',
+                            attempts = j.attempts - 1,
+                            locked_by = NULL,
+                            locked_until = NULL
+                        FROM unnest(CAST(:ids AS uuid[]), CAST(:attempts AS int[])) AS t(id, attempt)
+                        -- The fencing check, as in complete() and the heartbeat. run_at is left alone, so the job
+                        -- keeps its place in line (priority, then run_at) when it is claimed again.
+                        WHERE j.id = t.id AND j.attempts = t.attempt
+                          AND j.locked_by = :workerId AND j.status = 'RUNNING'
+                        """)
+                .param("ids", ids)
+                .param("attempts", attempts)
+                .param("workerId", workerId)
+                .update();
     }
 
     /**

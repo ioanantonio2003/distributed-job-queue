@@ -81,7 +81,7 @@ class JobHeartbeatIntegrationTest extends PostgresIntegrationTest {
         spring.refresh();
         WorkerProperties properties = new WorkerProperties("heartbeat-worker", List.of(queue), 1, LEASE,
                 Duration.ofMillis(50), Duration.ofMillis(100), Duration.ofMillis(100), Duration.ofSeconds(1),
-                HEARTBEAT, null);
+                HEARTBEAT, null, null);
         RunningJobs runningJobs = new RunningJobs();
         poller = new JobPoller(claimRepository, new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties, runningJobs);

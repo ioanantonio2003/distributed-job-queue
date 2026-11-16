@@ -1,9 +1,13 @@
 server:
   port: 8080
+  # On SIGTERM stop accepting new requests but let the running ones finish (up to the timeout below).
+  shutdown: graceful
 
 spring:
   application:
     name: jobqueue-server
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/jobqueue}
     username: ${DB_USER:jobqueue}
