@@ -76,7 +76,7 @@ class JobPollerIntegrationTest extends PostgresIntegrationTest {
 
         WorkerProperties properties = new WorkerProperties("test-worker", List.of(queue), slots,
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(200),
-                Duration.ofMillis(50), Duration.ofMillis(200), null);
+                Duration.ofMillis(50), Duration.ofMillis(200), null, null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
         poller.start();

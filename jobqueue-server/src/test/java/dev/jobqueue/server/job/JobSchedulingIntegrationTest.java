@@ -149,7 +149,7 @@ class JobSchedulingIntegrationTest extends PostgresIntegrationTest {
     private List<String> claimOneAtATime(String queue, int times) {
         List<String> types = new ArrayList<>();
         for (int i = 0; i < times; i++) {
-            claimRepository.claim("sched-worker", List.of(queue), LEASE, 1).forEach(job -> types.add(job.type()));
+            claimRepository.claim("sched-worker", queue, LEASE, 1).forEach(job -> types.add(job.type()));
         }
         return types;
     }
@@ -178,12 +178,12 @@ class JobSchedulingIntegrationTest extends PostgresIntegrationTest {
     void shouldNotClaimADelayedJobBeforeItsTimeAndClaimItAfterwards() throws Exception {
         UUID id = postJob("{\"queue\":\"sched-wait\",\"type\":\"later\",\"delaySeconds\":2}");
 
-        assertThat(claimRepository.claim("sched-worker", List.of("sched-wait"), LEASE, 10))
+        assertThat(claimRepository.claim("sched-worker", "sched-wait", LEASE, 10))
                 .as("claimed before its time").isEmpty();
 
         AtomicReference<List<ClaimedJob>> claimed = new AtomicReference<>(List.of());
         await().atMost(Duration.ofSeconds(10)).until(() -> {
-            claimed.set(claimRepository.claim("sched-worker", List.of("sched-wait"), LEASE, 10));
+            claimed.set(claimRepository.claim("sched-worker", "sched-wait", LEASE, 10));
             return !claimed.get().isEmpty();
         });
         assertThat(claimed.get()).singleElement().satisfies(job -> assertThat(job.id()).isEqualTo(id));

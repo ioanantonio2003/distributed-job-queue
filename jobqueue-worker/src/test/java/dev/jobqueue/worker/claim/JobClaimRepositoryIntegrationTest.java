@@ -32,7 +32,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
 
         List<String> claimedOrder = new ArrayList<>();
         for (int i = 0; i < 4; i++) {
-            claimedOrder.addAll(repository.claim("w1", List.of("order"), LEASE, 1).stream()
+            claimedOrder.addAll(repository.claim("w1", "order", LEASE, 1).stream()
                     .map(ClaimedJob::type).toList());
         }
 
@@ -45,7 +45,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
         insert("limit", "high-1", 9, "now() - interval '2 minutes'");
         insert("limit", "high-2", 9, "now() - interval '1 minute'");
 
-        List<ClaimedJob> claimed = repository.claim("w1", List.of("limit"), LEASE, 2);
+        List<ClaimedJob> claimed = repository.claim("w1", "limit", LEASE, 2);
 
         // Order inside the returned list is not guaranteed, only which jobs were picked.
         assertThat(claimed).extracting(ClaimedJob::type).containsExactlyInAnyOrder("high-1", "high-2");
@@ -55,7 +55,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
     void shouldNotClaimJobWhenRunAtIsInTheFuture() {
         UUID future = insert("future", "later", 0, "now() + interval '1 hour'");
 
-        List<ClaimedJob> claimed = repository.claim("w1", List.of("future"), LEASE, 10);
+        List<ClaimedJob> claimed = repository.claim("w1", "future", LEASE, 10);
 
         assertThat(claimed).isEmpty();
         assertThat(statusOf(future)).isEqualTo("QUEUED");
@@ -65,7 +65,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
     void shouldLeaseTheJobWhenClaiming() {
         UUID id = insert("lease", "t", 0, "now()");
 
-        List<ClaimedJob> claimed = repository.claim("worker-42", List.of("lease"), LEASE, 1);
+        List<ClaimedJob> claimed = repository.claim("worker-42", "lease", LEASE, 1);
 
         assertThat(claimed).singleElement().satisfies(job -> {
             assertThat(job.id()).isEqualTo(id);
@@ -90,22 +90,24 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
     void shouldNotClaimTheSameJobTwiceWhenClaimingAgain() {
         insert("twice", "t", 0, "now()");
 
-        List<ClaimedJob> first = repository.claim("w1", List.of("twice"), LEASE, 10);
-        List<ClaimedJob> second = repository.claim("w2", List.of("twice"), LEASE, 10);
+        List<ClaimedJob> first = repository.claim("w1", "twice", LEASE, 10);
+        List<ClaimedJob> second = repository.claim("w2", "twice", LEASE, 10);
 
         assertThat(first).hasSize(1);
         assertThat(second).isEmpty();
     }
 
     @Test
-    void shouldOnlyClaimFromRequestedQueuesWhenSeveralQueuesExist() {
-        insert("multi-a", "a", 0, "now()");
+    void shouldOnlyClaimFromTheRequestedQueueWhenSeveralQueuesExist() {
+        insert("multi-a", "a", 9, "now()");
         insert("multi-b", "b", 0, "now()");
         insert("multi-c", "c", 0, "now()");
 
-        List<ClaimedJob> claimed = repository.claim("w1", List.of("multi-a", "multi-b"), LEASE, 10);
+        // multi-a holds the job with the highest priority, but we ask for multi-b: only its job comes back.
+        List<ClaimedJob> claimed = repository.claim("w1", "multi-b", LEASE, 10);
 
-        assertThat(claimed).extracting(ClaimedJob::type).containsExactlyInAnyOrder("a", "b");
+        assertThat(claimed).extracting(ClaimedJob::type).containsExactly("b");
+        assertThat(repository.claim("w1", "multi-a", LEASE, 10)).extracting(ClaimedJob::type).containsExactly("a");
     }
 
     @Test
@@ -125,7 +127,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
                 start.await();
                 List<ClaimedJob> batch;
                 do {
-                    batch = repository.claim(workerId, List.of("concurrent"), LEASE, 10);
+                    batch = repository.claim(workerId, "concurrent", LEASE, 10);
                     batch.forEach(job -> mine.add(job.id()));
                 } while (!batch.isEmpty());
                 return mine;
@@ -154,7 +156,7 @@ class JobClaimRepositoryIntegrationTest extends PostgresIntegrationTest {
     private ClaimedJob claimWithShortLease(String worker) {
         String queue = "extend-" + UUID.randomUUID();
         insert(queue, "t", 0, "now()");
-        return repository.claim(worker, List.of(queue), Duration.ofSeconds(5), 1).getFirst();
+        return repository.claim(worker, queue, Duration.ofSeconds(5), 1).getFirst();
     }
 
     /** True if the job's lease ends more than {@code seconds} from now. */

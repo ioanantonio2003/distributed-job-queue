@@ -86,7 +86,7 @@ class JobTimeoutIntegrationTest extends PostgresIntegrationTest {
         spring.refresh();
         WorkerProperties properties = new WorkerProperties("timeout-worker", List.of(queue), slots,
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(100),
-                Duration.ofMillis(100), Duration.ofSeconds(1), null);
+                Duration.ofMillis(100), Duration.ofSeconds(1), null, null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
                 spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
         poller.start();

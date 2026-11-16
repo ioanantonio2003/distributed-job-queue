@@ -67,12 +67,17 @@ public class JobClaimRepository {
     }
 
     /**
-     * Claims up to {@code limit} runnable jobs from {@code queues}, highest priority first, then oldest run_at.
+     * Claims up to {@code limit} runnable jobs from one {@code queue}, highest priority first, then oldest run_at.
+     *
+     * <p>One queue per statement, with {@code queue = :queue} (equality), on purpose: with equality PostgreSQL can
+     * read {@code jobs_claim_idx (queue, priority DESC, run_at)} directly in the order asked for and stop after
+     * {@code limit} rows. With {@code queue = ANY(array)} it has to read every runnable job of every listed queue
+     * and sort them, so the cost of a claim grows with the backlog instead of with {@code limit}.
      *
      * <p>The returned list is NOT guaranteed to be in that order (UPDATE ... RETURNING has no ordering
      * guarantee); the ORDER BY only decides which jobs are picked.
      */
-    public List<ClaimedJob> claim(String workerId, List<String> queues, Duration lease, int limit) {
+    public List<ClaimedJob> claim(String workerId, String queue, Duration lease, int limit) {
         return jdbc.sql("""
                         UPDATE jobs
                         SET status = 'RUNNING',
@@ -86,7 +91,7 @@ public class JobClaimRepository {
                         WHERE id IN (
                             SELECT id FROM jobs
                             WHERE status = 'QUEUED'
-                              AND queue = ANY(:queues)
+                              AND queue = :queue
                               AND run_at <= now()
                             ORDER BY priority DESC, run_at
                             LIMIT :limit
@@ -98,8 +103,7 @@ public class JobClaimRepository {
                         """)
                 .param("workerId", workerId)
                 .param("leaseSeconds", lease.toSeconds())
-                // An array, not a List: a List would be expanded into (?, ?, ...) and break ANY(...).
-                .param("queues", queues.toArray(new String[0]))
+                .param("queue", queue)
                 .param("limit", limit)
                 .query((rs, rowNum) -> new ClaimedJob(
                         rs.getObject("id", UUID.class),

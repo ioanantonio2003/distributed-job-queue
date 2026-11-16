@@ -27,13 +27,15 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 /**
- * Claims jobs and runs their handlers, never more at once than {@code slots}.
+ * Claims jobs and runs their handlers, never more at once <b>per queue</b> than that queue's slots.
  *
- * <p>Invariants: (1) the number of jobs being executed never exceeds the slot count, because a permit is taken
- * before a job is claimed and returned only when its execution ends, by completion, failure or timeout;
- * (2) a handler runs on its own virtual thread, after the claim statement has finished, so it holds no
- * database connection or transaction. Caveat to (1): after a timeout the slot is freed even if the handler
- * ignored the interrupt and is still running in the background (Java cannot kill a thread).
+ * <p>Invariants: (1) the number of jobs being executed from a queue never exceeds that queue's slot count,
+ * because a permit of the queue is taken before a job is claimed and returned only when its execution ends, by
+ * completion, failure or timeout; (2) a handler runs on its own virtual thread, after the claim statement has
+ * finished, so it holds no database connection or transaction; (3) queues do not share permits, so a queue
+ * whose jobs are slow can fill its own slots and nothing else (the bulkhead). Caveat to (1): after a timeout the
+ * slot is freed even if the handler ignored the interrupt and is still running in the background (Java cannot
+ * kill a thread).
  *
  * <p>Only the poller thread takes permits; handler threads only give them back. That is what makes
  * "take everything that is free, then claim that many" safe without extra locking.
@@ -49,7 +51,13 @@ public class JobPoller implements SmartLifecycle {
     private final WorkerProperties properties;
     private final RunningJobs runningJobs;
     private final BackoffCalculator backoff;
-    private final Semaphore slots;
+    private final List<QueueSlots> queues;
+    // Released by every finishing handler, to wake the poller up as soon as a slot is free again.
+    private final Semaphore wakeups = new Semaphore(0);
+
+    /** One queue and its own permits: the unit of isolation. */
+    private record QueueSlots(String name, Semaphore permits) {
+    }
 
     private volatile boolean running;
     private Thread pollerThread;
@@ -62,7 +70,9 @@ public class JobPoller implements SmartLifecycle {
         this.properties = properties;
         this.runningJobs = runningJobs;
         this.backoff = new BackoffCalculator(properties.retryBaseDelay(), properties.retryMaxDelay());
-        this.slots = new Semaphore(properties.slots());
+        this.queues = properties.queueSlots().entrySet().stream()
+                .map(entry -> new QueueSlots(entry.getKey(), new Semaphore(entry.getValue())))
+                .toList();
     }
 
     @Override
@@ -73,8 +83,8 @@ public class JobPoller implements SmartLifecycle {
         running = true;
         // A dedicated platform thread: it spends its life blocked on the semaphore, the database or a sleep.
         pollerThread = Thread.ofPlatform().name("job-poller-" + properties.workerId()).start(this::pollLoop);
-        log.info("Worker {} started: queues={}, slots={}, lease={}",
-                properties.workerId(), properties.queues(), properties.slots(), properties.lease());
+        log.info("Worker {} started: queues (name=slots)={}, lease={}",
+                properties.workerId(), properties.queueSlots(), properties.lease());
     }
 
     // Does not wait for running handlers: a graceful drain is a later step.
@@ -100,50 +110,54 @@ public class JobPoller implements SmartLifecycle {
     private void pollLoop() {
         Duration idleWait = properties.pollInterval();
         while (running) {
-            int permits;
-            try {
-                // Blocks while every slot is busy: no database polling when we could not run anything anyway.
-                slots.acquire();
-                permits = 1 + slots.drainPermits();
-            } catch (InterruptedException e) {
+            boolean claimedAny = false;
+            boolean anySlotFree = false;
+
+            // One pass over the queues. Each queue is claimed on its own, with its own free slots, so a
+            // queue that is full (or slow) is simply skipped and never holds the others back.
+            for (QueueSlots queue : queues) {
+                int free = queue.permits().drainPermits(); // only this thread takes permits
+                if (free == 0) {
+                    continue;
+                }
+                anySlotFree = true;
+                List<ClaimedJob> claimed;
+                try {
+                    // Ask for exactly as many jobs as this queue has free slots (backpressure).
+                    claimed = claimRepository.claim(properties.workerId(), queue.name(), properties.lease(), free);
+                } catch (RuntimeException e) {
+                    log.error("Claim from queue '{}' failed, will retry", queue.name(), e);
+                    queue.permits().release(free);
+                    continue;
+                }
+                queue.permits().release(free - claimed.size()); // slots we did not use
+                claimed.forEach(job -> startHandler(job, queue));
+                claimedAny |= !claimed.isEmpty();
+            }
+
+            if (claimedAny) {
+                idleWait = properties.pollInterval();
+                continue; // there may be more waiting: look again at once
+            }
+            // Nothing claimed. If every slot is busy there is nothing to look for until a handler ends (its
+            // release wakes us up, the long timeout is only a safety net). Otherwise the queues are empty or
+            // the database failed: wait, and wait longer each time.
+            if (!awaitWakeup(anySlotFree ? idleWait : properties.maxPollInterval())) {
                 return;
             }
-
-            List<ClaimedJob> claimed;
-            try {
-                // Ask for exactly as many jobs as there are free slots (backpressure).
-                claimed = claimRepository.claim(properties.workerId(), properties.queues(),
-                        properties.lease(), permits);
-            } catch (RuntimeException e) {
-                log.error("Claim failed, will retry", e);
-                slots.release(permits);
-                if (!pause(idleWait)) {
-                    return;
-                }
+            if (anySlotFree) {
                 idleWait = nextWait(idleWait);
-                continue;
-            }
-
-            slots.release(permits - claimed.size()); // slots we did not use
-            claimed.forEach(this::startHandler);
-
-            if (claimed.isEmpty()) {
-                if (!pause(idleWait)) {
-                    return;
-                }
-                idleWait = nextWait(idleWait);
-            } else {
-                idleWait = properties.pollInterval();
             }
         }
     }
 
-    private void startHandler(ClaimedJob job) {
+    private void startHandler(ClaimedJob job, QueueSlots queue) {
         Thread.ofVirtual().name("job-" + job.id()).start(() -> {
             try {
                 execute(job);
             } finally {
-                slots.release();
+                queue.permits().release();
+                wakeups.release(); // a slot is free: let the poller look at once, instead of at its next wait
             }
         });
     }
@@ -254,9 +268,12 @@ public class JobPoller implements SmartLifecycle {
         return doubled.compareTo(properties.maxPollInterval()) > 0 ? properties.maxPollInterval() : doubled;
     }
 
-    private boolean pause(Duration wait) {
+    // Waits for the timeout, or less if a handler finishes meanwhile. A wake-up that arrived before we started
+    // waiting is not lost: the semaphore remembers it. Returns false if the poller was told to stop.
+    private boolean awaitWakeup(Duration timeout) {
         try {
-            Thread.sleep(wait);
+            wakeups.tryAcquire(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            wakeups.drainPermits(); // one look at the queues covers every wake-up so far
             return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

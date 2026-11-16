@@ -29,7 +29,7 @@ class JobFailureRepositoryIntegrationTest extends PostgresIntegrationTest {
         String queue = "fail-" + UUID.randomUUID();
         JDBC.sql("INSERT INTO jobs (queue, type, max_attempts) VALUES (:q, 't', :m)")
                 .param("q", queue).param("m", maxAttempts).update();
-        return new Claim(queue, claimRepository.claim("w1", List.of(queue), LEASE, 1).getFirst());
+        return new Claim(queue, claimRepository.claim("w1", queue, LEASE, 1).getFirst());
     }
 
     private String row(UUID id) {
@@ -69,12 +69,12 @@ class JobFailureRepositoryIntegrationTest extends PostgresIntegrationTest {
         Claim delayed = claim(3);
         completionRepository.fail(delayed.job().id(), "w1", 1, "boom", false, Duration.ofSeconds(60), AttemptOutcome.FAILED);
 
-        assertThat(claimRepository.claim("w1", List.of(delayed.queue()), LEASE, 1)).isEmpty();
+        assertThat(claimRepository.claim("w1", delayed.queue(), LEASE, 1)).isEmpty();
 
         Claim immediate = claim(3);
         completionRepository.fail(immediate.job().id(), "w1", 1, "boom", false, Duration.ZERO, AttemptOutcome.FAILED);
 
-        List<ClaimedJob> again = claimRepository.claim("w1", List.of(immediate.queue()), LEASE, 1);
+        List<ClaimedJob> again = claimRepository.claim("w1", immediate.queue(), LEASE, 1);
         assertThat(again).singleElement().satisfies(job -> assertThat(job.attempt()).isEqualTo(2));
     }
 

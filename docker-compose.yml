@@ -56,6 +56,9 @@ services:
       JOBQUEUE_WORKER_QUEUES:
       JOBQUEUE_WORKER_LEASE:
       JOBQUEUE_WORKER_SLOTS:
+      # Per-queue concurrency for the two-queue demo (emails = fast, reports = slow); a queue named here is served.
+      JOBQUEUE_WORKER_CONCURRENCY_EMAILS:
+      JOBQUEUE_WORKER_CONCURRENCY_REPORTS:
     depends_on:
       # Waiting for the server means the schema has been migrated before any worker starts claiming.
       server:

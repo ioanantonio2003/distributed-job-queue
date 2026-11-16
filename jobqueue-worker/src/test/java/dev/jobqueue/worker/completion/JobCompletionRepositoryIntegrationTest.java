@@ -22,7 +22,7 @@ class JobCompletionRepositoryIntegrationTest extends PostgresIntegrationTest {
     private ClaimedJob claimedBy(String workerId) {
         String queue = "complete-" + UUID.randomUUID();
         JDBC.sql("INSERT INTO jobs (queue, type) VALUES (:q, 't')").param("q", queue).update();
-        return claimRepository.claim(workerId, List.of(queue), Duration.ofSeconds(30), 1).getFirst();
+        return claimRepository.claim(workerId, queue, Duration.ofSeconds(30), 1).getFirst();
     }
 
     private String snapshot(UUID id) {
