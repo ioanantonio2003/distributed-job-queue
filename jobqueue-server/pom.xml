@@ -48,6 +48,13 @@
             <groupId>org.flywaydb</groupId>
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
+        <!-- The reliability tests run real worker engines against the real reaper, in one JVM. -->
+        <dependency>
+            <groupId>dev.jobqueue</groupId>
+            <artifactId>jobqueue-worker</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- JUnit 5, AssertJ and Mockito come with the test starter. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -77,6 +84,11 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- Keep the plain jar as the main artifact (other modules may use it as a library, e.g. the
+                         reliability tests) and attach the executable jar with the "exec" classifier. -->
+                    <classifier>exec</classifier>
+                </configuration>
             </plugin>
         </plugins>
     </build>

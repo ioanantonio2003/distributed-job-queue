@@ -28,7 +28,7 @@ WORKDIR /app
 RUN addgroup -S app && adduser -S app -G app
 USER app
 
-COPY --from=build /build/jobqueue-worker/target/jobqueue-worker-*.jar app.jar
+COPY --from=build /build/jobqueue-worker/target/jobqueue-worker-*-exec.jar app.jar
 
 # 8081 is the actuator (health) port; it is not published to the host so the service can be scaled.
 EXPOSE 8081

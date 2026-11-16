@@ -11,6 +11,8 @@ COPY jobqueue-server/pom.xml jobqueue-server/pom.xml
 COPY jobqueue-worker/pom.xml jobqueue-worker/pom.xml
 COPY jobqueue-common/src jobqueue-common/src
 COPY jobqueue-server/src jobqueue-server/src
+# The server has the worker as a test-scope dependency (reliability tests), so the reactor builds it too.
+COPY jobqueue-worker/src jobqueue-worker/src
 
 # Windows checkouts may have CRLF line endings, which break the wrapper script and its properties on Linux.
 RUN sed -i 's/\r$//' mvnw .mvn/wrapper/maven-wrapper.properties && chmod +x mvnw
@@ -28,7 +30,7 @@ WORKDIR /app
 RUN addgroup -S app && adduser -S app -G app
 USER app
 
-COPY --from=build /build/jobqueue-server/target/jobqueue-server-*.jar app.jar
+COPY --from=build /build/jobqueue-server/target/jobqueue-server-*-exec.jar app.jar
 
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]

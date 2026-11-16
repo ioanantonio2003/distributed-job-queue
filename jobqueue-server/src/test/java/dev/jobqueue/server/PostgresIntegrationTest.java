@@ -1,5 +1,7 @@
 package dev.jobqueue.server;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import org.flywaydb.core.Flyway;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -32,5 +34,16 @@ public abstract class PostgresIntegrationTest {
         Flyway.configure().dataSource(DATA_SOURCE).locations("classpath:db/migration").load().migrate();
         JDBC = JdbcClient.create(DATA_SOURCE);
         JDBC_TEMPLATE = new JdbcTemplate(DATA_SOURCE);
+    }
+
+    /** A real connection pool on the test database, like a worker or server process would have; the caller closes it. */
+    protected static HikariDataSource newPool(int maxSize) {
+        DriverManagerDataSource plain = (DriverManagerDataSource) DATA_SOURCE;
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(plain.getUrl());
+        config.setUsername(plain.getUsername());
+        config.setPassword(plain.getPassword());
+        config.setMaximumPoolSize(maxSize);
+        return new HikariDataSource(config);
     }
 }
