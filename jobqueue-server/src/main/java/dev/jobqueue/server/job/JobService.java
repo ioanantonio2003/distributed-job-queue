@@ -6,9 +6,11 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /**
  * Business rules for jobs: validates the payload, delegates storage to {@link JobRepository}
@@ -30,7 +32,7 @@ public class JobService {
     }
 
     public EnqueueResult enqueue(EnqueueRequest request) {
-        Optional<UUID> id = repository.insert(toNewJob(request));
+        Optional<UUID> id = repository.insert(toNewJob(request, repository::databaseNow));
         if (id.isPresent()) {
             return new EnqueueResult(get(id.get()), true);
         }
@@ -51,7 +53,15 @@ public class JobService {
         if (request.jobs().stream().anyMatch(job -> job.idempotencyKey() != null)) {
             throw new InvalidJobException("idempotencyKey is not supported in batch requests");
         }
-        List<NewJob> newJobs = request.jobs().stream().map(this::toNewJob).toList();
+        // The database time is only needed to bound runAt, and one reading serves the whole batch.
+        Instant[] databaseNow = new Instant[1];
+        Supplier<Instant> clock = () -> {
+            if (databaseNow[0] == null) {
+                databaseNow[0] = repository.databaseNow();
+            }
+            return databaseNow[0];
+        };
+        List<NewJob> newJobs = request.jobs().stream().map(job -> toNewJob(job, clock)).toList();
         return new BatchEnqueueResponse(repository.insertBatch(newJobs));
     }
 
@@ -60,9 +70,22 @@ public class JobService {
         return toResponse(job);
     }
 
-    private NewJob toNewJob(EnqueueRequest request) {
+    private NewJob toNewJob(EnqueueRequest request, Supplier<Instant> databaseNow) {
+        if (request.delaySeconds() != null && request.runAt() != null) {
+            throw new InvalidJobException("give either delaySeconds or runAt, not both");
+        }
+        if (request.runAt() != null) {
+            // "Now" comes from the database, the same clock that will decide when the job may start.
+            Instant latest = databaseNow.get().plusSeconds(EnqueueRequest.MAX_DELAY_SECONDS);
+            if (request.runAt().isAfter(latest)) {
+                throw new InvalidJobException("runAt must be at most " + EnqueueRequest.MAX_DELAY_SECONDS
+                        + " seconds (30 days) in the future");
+            }
+        }
+        int delaySeconds = request.delaySeconds() == null ? 0 : request.delaySeconds();
         return new NewJob(request.queue(), request.type(), serializePayload(request.payload()),
-                request.priority(), request.maxAttempts(), request.timeoutSeconds(), request.idempotencyKey());
+                request.priority(), request.maxAttempts(), request.timeoutSeconds(), request.idempotencyKey(),
+                delaySeconds, request.runAt());
     }
 
     private JobResponse toResponse(Job job) {

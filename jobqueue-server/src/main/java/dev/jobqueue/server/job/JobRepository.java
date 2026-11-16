@@ -10,8 +10,10 @@ import org.springframework.stereotype.Repository;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -60,15 +62,19 @@ public class JobRepository {
 
     /**
      * Inserts a job and returns its generated id, or empty if a job with the same (queue, idempotency_key)
-     * already exists. Status, run_at and created_at take the column defaults, so the database clock decides them.
+     * already exists. Status and created_at take the column defaults. run_at is the given absolute time, or
+     * {@code now() + delay} when only a delay was given: in both cases the database clock is the reference.
      *
      * <p>The uniqueness rule is enforced by the partial unique index {@code jobs_idem_idx}, not by Java:
      * "check, then insert" would let two concurrent requests both pass the check.
      */
     public Optional<UUID> insert(NewJob job) {
         return jdbc.sql("""
-                        INSERT INTO jobs (queue, type, payload, priority, max_attempts, timeout_seconds, idempotency_key)
-                        VALUES (:queue, :type, CAST(:payload AS jsonb), :priority, :maxAttempts, :timeoutSeconds, :idempotencyKey)
+                        INSERT INTO jobs (queue, type, payload, priority, max_attempts, timeout_seconds, idempotency_key, run_at)
+                        VALUES (:queue, :type, CAST(:payload AS jsonb), :priority, :maxAttempts, :timeoutSeconds, :idempotencyKey,
+                                -- now() is the database clock: the delay is measured on the same clock that
+                                -- decides, at claim time, whether run_at has been reached.
+                                COALESCE(CAST(:runAt AS timestamptz), now() + :delaySeconds * interval '1 second'))
                         -- The conflict target repeats the index predicate so Postgres can match the partial index.
                         -- On conflict nothing is inserted and RETURNING yields no row.
                         ON CONFLICT (queue, idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -83,8 +89,18 @@ public class JobRepository {
                 .param("maxAttempts", job.maxAttempts())
                 .param("timeoutSeconds", job.timeoutSeconds())
                 .param("idempotencyKey", job.idempotencyKey())
+                // pgjdbc does not accept java.time.Instant as a parameter; OffsetDateTime is the supported type.
+                .param("runAt", job.runAt() == null ? null : job.runAt().atOffset(ZoneOffset.UTC))
+                .param("delaySeconds", job.delaySeconds())
                 .query(UUID.class)
                 .optional();
+    }
+
+    /**
+     * The current time of the database server: the clock that decides when a job becomes runnable.
+     */
+    public Instant databaseNow() {
+        return jdbc.sql("SELECT now()").query(OffsetDateTime.class).single().toInstant();
     }
 
     /**
@@ -95,8 +111,9 @@ public class JobRepository {
     public List<UUID> insertBatch(List<NewJob> jobs) {
         List<UUID> ids = jobs.stream().map(job -> UUID.randomUUID()).toList();
         jdbcTemplate.batchUpdate("""
-                INSERT INTO jobs (id, queue, type, payload, priority, max_attempts, timeout_seconds)
-                VALUES (?, ?, ?, CAST(? AS jsonb), ?, ?, ?)
+                INSERT INTO jobs (id, queue, type, payload, priority, max_attempts, timeout_seconds, run_at)
+                VALUES (?, ?, ?, CAST(? AS jsonb), ?, ?, ?,
+                        COALESCE(CAST(? AS timestamptz), now() + ? * interval '1 second'))
                 """, new BatchPreparedStatementSetter() {
             @Override
             public void setValues(PreparedStatement ps, int i) throws SQLException {
@@ -108,6 +125,12 @@ public class JobRepository {
                 ps.setInt(5, job.priority());
                 ps.setInt(6, job.maxAttempts());
                 ps.setInt(7, job.timeoutSeconds());
+                if (job.runAt() == null) {
+                    ps.setNull(8, Types.TIMESTAMP_WITH_TIMEZONE);
+                } else {
+                    ps.setObject(8, job.runAt().atOffset(ZoneOffset.UTC));
+                }
+                ps.setInt(9, job.delaySeconds());
             }
 
             @Override
