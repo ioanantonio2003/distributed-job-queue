@@ -8,6 +8,8 @@ import dev.jobqueue.worker.claim.ClaimedJob;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.metrics.JobMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.worker.heartbeat.HeartbeatService;
 import dev.jobqueue.worker.heartbeat.RunningJobs;
 import org.junit.jupiter.api.AfterEach;
@@ -93,7 +95,7 @@ class GracefulShutdownIntegrationTest extends PostgresIntegrationTest {
         RunningJobs runningJobs = new RunningJobs();
         JobClaimRepository claimRepository = new JobClaimRepository(JDBC);
         poller = new JobPoller(claimRepository, new JobCompletionRepository(JDBC),
-                spring.getBean(HandlerRegistry.class), properties, runningJobs);
+                spring.getBean(HandlerRegistry.class), properties, runningJobs, new JobMetrics(new SimpleMeterRegistry()));
         if (withHeartbeat) {
             heartbeat = new HeartbeatService(claimRepository, runningJobs, properties);
             heartbeat.start();
@@ -163,6 +165,9 @@ class GracefulShutdownIntegrationTest extends PostgresIntegrationTest {
         assertThat(handlers.holdStarted.await(10, TimeUnit.SECONDS)).isTrue();
 
         CompletableFuture<Void> stopping = CompletableFuture.runAsync(poller::stop); // blocks: draining
+        // stop() runs on another thread: wait until it has really stopped the poll loop before adding the new job,
+        // otherwise the still-running poller could claim it first and the test would race.
+        await().atMost(Duration.ofSeconds(10)).until(poller::isDraining);
         UUID late = insertJob("shut-drain", "short");
 
         // While draining, the running job is untouched and the new one is left in the queue.

@@ -99,7 +99,9 @@ public class JobClaimRepository {
                             FOR UPDATE SKIP LOCKED
                         )
                         RETURNING id, queue, type, payload::text AS payload, attempts, max_attempts,
-                                  timeout_seconds, idempotency_key
+                                  timeout_seconds, idempotency_key,
+                                  -- started_at is the new value (now()): the time between "runnable" and "started".
+                                  CAST(EXTRACT(EPOCH FROM (started_at - run_at)) AS double precision) AS waited_seconds
                         """)
                 .param("workerId", workerId)
                 .param("leaseSeconds", lease.toSeconds())
@@ -113,7 +115,8 @@ public class JobClaimRepository {
                         rs.getInt("attempts"),
                         rs.getInt("max_attempts"),
                         rs.getInt("timeout_seconds"),
-                        rs.getString("idempotency_key")))
+                        rs.getString("idempotency_key"),
+                        rs.getDouble("waited_seconds")))
                 .list();
     }
 }

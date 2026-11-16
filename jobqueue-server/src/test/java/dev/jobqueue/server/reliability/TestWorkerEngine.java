@@ -5,6 +5,8 @@ import dev.jobqueue.worker.WorkerProperties;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.metrics.JobMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.worker.heartbeat.HeartbeatService;
 import dev.jobqueue.worker.heartbeat.RunningJobs;
 import dev.jobqueue.worker.poller.JobPoller;
@@ -70,7 +72,7 @@ final class TestWorkerEngine {
             }
         };
         poller = new JobPoller(claimRepository, completionRepository, spring.getBean(HandlerRegistry.class),
-                properties, runningJobs);
+                properties, runningJobs, new JobMetrics(new SimpleMeterRegistry()));
         heartbeat = heartbeatEnabled ? new HeartbeatService(claimRepository, runningJobs, properties) : null;
     }
 

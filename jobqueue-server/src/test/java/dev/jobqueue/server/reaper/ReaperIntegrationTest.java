@@ -1,6 +1,7 @@
 package dev.jobqueue.server.reaper;
 
 import dev.jobqueue.server.PostgresIntegrationTest;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.server.reaper.ReaperRepository.ReapResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -127,9 +128,23 @@ class ReaperIntegrationTest extends PostgresIntegrationTest {
         ReapResult first = repository.reap(2);
         assertThat(first.total()).isEqualTo(2);
 
-        service = new ReaperService(repository, new ReaperProperties(Duration.ofSeconds(10), 2));
+        service = new ReaperService(repository, new ReaperProperties(Duration.ofSeconds(10), 2), new SimpleMeterRegistry());
         ReapResult rest = service.reapAll(); // keeps going: 2, then 1 (not full) => stops
         assertThat(rest.total()).isEqualTo(3);
+    }
+
+    @Test
+    void shouldCountRecoveredJobsInTheMetricByResultWhenReaping() {
+        SimpleMeterRegistry meters = new SimpleMeterRegistry();
+        service = new ReaperService(repository, new ReaperProperties(Duration.ofSeconds(10), 100), meters);
+        runningJob("reap-metric", "dead-worker", 1, 5, "-10 seconds");
+        runningJob("reap-metric", "dead-worker", 2, 5, "-10 seconds");
+        runningJob("reap-metric", "dead-worker", 5, 5, "-10 seconds"); // last attempt: dies
+
+        service.reapAll();
+
+        assertThat(meters.get("jobqueue.reaper.lease.expired").tag("result", "requeued").counter().count()).isEqualTo(2);
+        assertThat(meters.get("jobqueue.reaper.lease.expired").tag("result", "dead").counter().count()).isEqualTo(1);
     }
 
     @Test
@@ -145,7 +160,7 @@ class ReaperIntegrationTest extends PostgresIntegrationTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         List<Future<ReapResult>> futures = new ArrayList<>();
         for (int r = 0; r < 2; r++) {
-            ReaperService reaper = new ReaperService(repository, new ReaperProperties(Duration.ofSeconds(10), 10));
+            ReaperService reaper = new ReaperService(repository, new ReaperProperties(Duration.ofSeconds(10), 10), new SimpleMeterRegistry());
             futures.add(pool.submit(() -> {
                 start.await();
                 return reaper.reapAll();
@@ -173,7 +188,7 @@ class ReaperIntegrationTest extends PostgresIntegrationTest {
 
     @Test
     void shouldReapPeriodicallyWhenTheServiceIsStarted() {
-        service = new ReaperService(repository, new ReaperProperties(Duration.ofMillis(100), 100));
+        service = new ReaperService(repository, new ReaperProperties(Duration.ofMillis(100), 100), new SimpleMeterRegistry());
         service.start();
 
         UUID id = runningJob("reap-periodic", "dead-worker", 1, 5, "-1 seconds");
@@ -195,7 +210,7 @@ class ReaperIntegrationTest extends PostgresIntegrationTest {
                 return super.reap(batchSize);
             }
         };
-        service = new ReaperService(failsOnce, new ReaperProperties(Duration.ofMillis(100), 100));
+        service = new ReaperService(failsOnce, new ReaperProperties(Duration.ofMillis(100), 100), new SimpleMeterRegistry());
         UUID id = runningJob("reap-hiccup", "dead-worker", 1, 5, "-1 seconds");
 
         service.start();

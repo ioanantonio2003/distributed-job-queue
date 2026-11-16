@@ -1,5 +1,8 @@
 package dev.jobqueue.server.job;
 
+import dev.jobqueue.common.JobStatus;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import tools.jackson.databind.JsonNode;
@@ -11,6 +14,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * Business rules for jobs: validates the payload, delegates storage to {@link JobRepository}
@@ -25,15 +29,27 @@ public class JobService {
 
     private final JobRepository repository;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
 
-    public JobService(JobRepository repository, ObjectMapper objectMapper) {
+    public JobService(JobRepository repository, ObjectMapper objectMapper, MeterRegistry meterRegistry) {
         this.repository = repository;
         this.objectMapper = objectMapper;
+        this.meterRegistry = meterRegistry;
+    }
+
+    // jobqueue.jobs.enqueued{queue}: jobs accepted by the API (a repeated idempotent request is not counted again).
+    private void countEnqueued(String queue, int jobs) {
+        Counter.builder("jobqueue.jobs.enqueued")
+                .description("Jobs accepted by the API")
+                .tag("queue", queue)
+                .register(meterRegistry)
+                .increment(jobs);
     }
 
     public EnqueueResult enqueue(EnqueueRequest request) {
         Optional<UUID> id = repository.insert(toNewJob(request, repository::databaseNow));
         if (id.isPresent()) {
+            countEnqueued(request.queue(), 1);
             return new EnqueueResult(get(id.get()), true);
         }
         // Empty means the idempotency key already exists: return the job that got there first.
@@ -62,12 +78,53 @@ public class JobService {
             return databaseNow[0];
         };
         List<NewJob> newJobs = request.jobs().stream().map(job -> toNewJob(job, clock)).toList();
-        return new BatchEnqueueResponse(repository.insertBatch(newJobs));
+        BatchEnqueueResponse response = new BatchEnqueueResponse(repository.insertBatch(newJobs));
+        newJobs.stream().collect(Collectors.groupingBy(NewJob::queue, Collectors.counting()))
+                .forEach((queue, count) -> countEnqueued(queue, count.intValue()));
+        return response;
     }
 
     public JobResponse get(UUID id) {
         Job job = repository.findById(id).orElseThrow(() -> new JobNotFoundException(id));
         return toResponse(job);
+    }
+
+    /** The job together with its history of attempts. */
+    public JobDetailResponse getDetail(UUID id) {
+        return new JobDetailResponse(get(id), repository.findAttempts(id));
+    }
+
+    public PageResponse<JobResponse> list(String queue, JobStatus status, String type, int page, int size) {
+        List<JobResponse> items = repository.findPage(blankToNull(queue), status, blankToNull(type), size, page * size)
+                .stream().map(this::toResponse).toList();
+        return new PageResponse<>(items, page, size, repository.count(blankToNull(queue), status, blankToNull(type)));
+    }
+
+    /** Cancels a job that has not started yet. A job that is running (or finished) cannot be cancelled: 409. */
+    public JobResponse cancel(UUID id) {
+        if (repository.cancel(id)) {
+            return get(id);
+        }
+        Job job = repository.findById(id).orElseThrow(() -> new JobNotFoundException(id));
+        throw new InvalidJobStateException("Job " + id + " is " + job.status() + ": only QUEUED jobs can be cancelled"
+                + (job.status() == JobStatus.RUNNING ? " (a running job cannot be stopped from outside)" : ""));
+    }
+
+    /** Puts a dead job back in the queue with a fresh set of attempts. Any other status: 409. */
+    public JobResponse retry(UUID id) {
+        if (repository.retry(id)) {
+            return get(id);
+        }
+        Job job = repository.findById(id).orElseThrow(() -> new JobNotFoundException(id));
+        throw new InvalidJobStateException("Job " + id + " is " + job.status() + ": only DEAD jobs can be retried");
+    }
+
+    public List<QueueStats> queueStats() {
+        return repository.queueStats();
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     private NewJob toNewJob(EnqueueRequest request, Supplier<Instant> databaseNow) {

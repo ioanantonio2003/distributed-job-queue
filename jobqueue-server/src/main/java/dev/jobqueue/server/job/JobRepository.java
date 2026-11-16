@@ -148,6 +148,118 @@ public class JobRepository {
                 .optional();
     }
 
+    // The optional filters: a null parameter means "do not filter on this". CAST gives the null a type, which
+    // PostgreSQL needs to plan the statement. Meant for the admin screens, not for the hot path: these filters
+    // are not served by the claim indexes.
+    private static final String FILTER = """
+            (CAST(:queue AS text) IS NULL OR queue = :queue)
+            AND (CAST(:status AS text) IS NULL OR status = :status)
+            AND (CAST(:type AS text) IS NULL OR type = :type)
+            """;
+
+    /**
+     * One page of jobs, newest first. OFFSET paging is simple but reads and discards {@code offset} rows, so
+     * very deep pages get slower; fine for an admin view, not for walking millions of jobs.
+     */
+    public List<Job> findPage(String queue, JobStatus status, String type, int limit, int offset) {
+        return jdbc.sql("SELECT " + COLUMNS + " FROM jobs WHERE " + FILTER
+                        + " ORDER BY created_at DESC, id LIMIT :limit OFFSET :offset")
+                .param("queue", queue)
+                .param("status", status == null ? null : status.name())
+                .param("type", type)
+                .param("limit", limit)
+                .param("offset", offset)
+                .query(JOB_MAPPER)
+                .list();
+    }
+
+    public long count(String queue, JobStatus status, String type) {
+        return jdbc.sql("SELECT count(*) FROM jobs WHERE " + FILTER)
+                .param("queue", queue)
+                .param("status", status == null ? null : status.name())
+                .param("type", type)
+                .query(Long.class)
+                .single();
+    }
+
+    public List<AttemptResponse> findAttempts(UUID jobId) {
+        return jdbc.sql("""
+                        SELECT attempt, worker_id, started_at, finished_at, outcome, error
+                        FROM job_attempts WHERE job_id = :id ORDER BY attempt
+                        """)
+                .param("id", jobId)
+                .query((rs, rowNum) -> new AttemptResponse(
+                        rs.getInt("attempt"),
+                        rs.getString("worker_id"),
+                        instant(rs, "started_at"),
+                        instant(rs, "finished_at"),
+                        rs.getString("outcome"),
+                        rs.getString("error")))
+                .list();
+    }
+
+    /**
+     * QUEUED to CANCELLED, atomically: the status check and the change are one statement, so a worker that claims
+     * the job at the same moment either wins (this returns false) or loses (the job is never claimed).
+     *
+     * @return true if the job was QUEUED and is now CANCELLED
+     */
+    public boolean cancel(UUID id) {
+        return jdbc.sql("""
+                        UPDATE jobs SET status = 'CANCELLED', finished_at = now()
+                        WHERE id = :id AND status = 'QUEUED'
+                        """)
+                .param("id", id).update() == 1;
+    }
+
+    /**
+     * DEAD to QUEUED, atomically, runnable now. {@code attempts} is kept, because job_attempts already holds one
+     * row per attempt (UNIQUE (job_id, attempt)) and numbering must go on from there; instead max_attempts is
+     * raised by the current value, so the job gets a fresh full set of attempts.
+     *
+     * @return true if the job was DEAD and is queued again
+     */
+    public boolean retry(UUID id) {
+        return jdbc.sql("""
+                        UPDATE jobs
+                        SET status = 'QUEUED', max_attempts = attempts + max_attempts, run_at = now(),
+                            finished_at = NULL, locked_by = NULL, locked_until = NULL
+                        WHERE id = :id AND status = 'DEAD'
+                        """)
+                .param("id", id).update() == 1;
+    }
+
+    /**
+     * Jobs per queue and status, and how long the oldest runnable QUEUED job has waited, in one pass over the table
+     * (a single GROUP BY, not one query per queue). It reads every row, so it is for occasional admin use.
+     */
+    public List<QueueStats> queueStats() {
+        return jdbc.sql("""
+                        SELECT queue,
+                               count(*) FILTER (WHERE status = 'QUEUED')    AS queued,
+                               count(*) FILTER (WHERE status = 'RUNNING')   AS running,
+                               count(*) FILTER (WHERE status = 'SUCCEEDED') AS succeeded,
+                               count(*) FILTER (WHERE status = 'DEAD')      AS dead,
+                               count(*) FILTER (WHERE status = 'CANCELLED') AS cancelled,
+                               -- Only jobs already runnable have been "waiting"; the database clock measures it.
+                               -- EXTRACT returns numeric, which the driver will not hand over as a Double.
+                               CAST(EXTRACT(EPOCH FROM now() - min(run_at) FILTER (WHERE status = 'QUEUED' AND run_at <= now()))
+                                    AS double precision) AS oldest_queued_age_seconds
+                        FROM jobs
+                        GROUP BY queue
+                        ORDER BY queue
+                        """)
+                .query((rs, rowNum) -> new QueueStats(
+                        rs.getString("queue"),
+                        rs.getLong("queued"),
+                        rs.getLong("running"),
+                        rs.getLong("succeeded"),
+                        rs.getLong("dead"),
+                        rs.getLong("cancelled"),
+                        rs.getObject("oldest_queued_age_seconds", Double.class)))
+                .list();
+    }
+
     // Uses jobs_idem_idx; used after an insert hit a conflict, to return the job that won.
     public Optional<Job> findByIdempotencyKey(String queue, String idempotencyKey) {
         return jdbc.sql("SELECT " + COLUMNS + " FROM jobs WHERE queue = :queue AND idempotency_key = :key")

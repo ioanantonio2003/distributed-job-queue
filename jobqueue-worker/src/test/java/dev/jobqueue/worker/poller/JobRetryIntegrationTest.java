@@ -6,6 +6,8 @@ import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.demo.FailureDemoHandlers;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.metrics.JobMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.worker.heartbeat.RunningJobs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -50,7 +52,7 @@ class JobRetryIntegrationTest extends PostgresIntegrationTest {
                 Duration.ofSeconds(30), Duration.ofMillis(50), Duration.ofMillis(100),
                 RETRY_BASE, Duration.ofSeconds(5), null, null, null);
         poller = new JobPoller(new JobClaimRepository(JDBC), new JobCompletionRepository(JDBC),
-                spring.getBean(HandlerRegistry.class), properties, new RunningJobs());
+                spring.getBean(HandlerRegistry.class), properties, new RunningJobs(), new JobMetrics(new SimpleMeterRegistry()));
         poller.start();
     }
 

@@ -7,6 +7,8 @@ import dev.jobqueue.common.JobHandler;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.metrics.JobMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.worker.heartbeat.RunningJobs;
 import dev.jobqueue.worker.poller.JobPoller;
 import org.junit.jupiter.api.AfterEach;
@@ -97,7 +99,7 @@ class CoreEndToEndIntegrationTest extends PostgresIntegrationTest {
                     Duration.ofSeconds(60), Duration.ofMillis(20), Duration.ofMillis(100),
                     Duration.ofSeconds(1), Duration.ofSeconds(5), null, null, null);
             JobPoller poller = new JobPoller(new JobClaimRepository(jdbc), new JobCompletionRepository(jdbc),
-                    registry, properties, new RunningJobs());
+                    registry, properties, new RunningJobs(), new JobMetrics(new SimpleMeterRegistry()));
             pollers.add(poller);
             poller.start();
         }

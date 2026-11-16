@@ -7,6 +7,8 @@ import dev.jobqueue.worker.WorkerProperties;
 import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
+import dev.jobqueue.worker.metrics.JobMetrics;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import dev.jobqueue.worker.poller.JobPoller;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -84,7 +86,7 @@ class JobHeartbeatIntegrationTest extends PostgresIntegrationTest {
                 HEARTBEAT, null, null);
         RunningJobs runningJobs = new RunningJobs();
         poller = new JobPoller(claimRepository, new JobCompletionRepository(JDBC),
-                spring.getBean(HandlerRegistry.class), properties, runningJobs);
+                spring.getBean(HandlerRegistry.class), properties, runningJobs, new JobMetrics(new SimpleMeterRegistry()));
         heartbeat = new HeartbeatService(claimRepository, runningJobs, properties);
         poller.start();
         heartbeat.start();

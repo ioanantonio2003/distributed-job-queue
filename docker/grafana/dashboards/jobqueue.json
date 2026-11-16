@@ -1,0 +1,103 @@
+{
+  "uid": "jobqueue",
+  "title": "Distributed Job Queue",
+  "tags": ["jobqueue"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Workers up",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "count(up{job=\"worker\"} == 1) or vector(0)", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 2, "type": "stat", "title": "Jobs ready to run (all queues)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(max by (queue) (jobqueue_queue_jobs{state=\"ready\"})) or vector(0)", "instant": true } ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Failure ratio (last 5 min)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(rate(jobqueue_jobs_processed_total{outcome=~\"failed|timed_out\"}[5m])) / sum(rate(jobqueue_jobs_processed_total[5m]))", "instant": true } ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 4, "type": "stat", "title": "Dead jobs (last 15 min)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum(increase(jobqueue_jobs_dead_total[15m])) or vector(0)", "instant": true } ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 0 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Queue depth: jobs ready to run",
+      "description": "Jobs waiting for a worker, per queue. Grows when jobs arrive faster than workers finish them.",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "max by (queue) (jobqueue_queue_jobs{state=\"ready\"})", "legendFormat": "{{queue}}" } ]
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "Oldest waiting job (seconds)",
+      "description": "How long the longest-waiting ready job has waited. The queue is healthy when this stays low.",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "max by (queue) (jobqueue_queue_oldest_age_seconds)", "legendFormat": "{{queue}}" } ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "Processing rate (attempts per second, by outcome)",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (outcome) (rate(jobqueue_jobs_processed_total[1m]))", "legendFormat": "{{outcome}}" } ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Enqueue rate (jobs per second)",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (queue) (rate(jobqueue_jobs_enqueued_total[1m]))", "legendFormat": "{{queue}}" } ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "Handler duration (p50 and p95)",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.5, sum by (le, type) (rate(jobqueue_handler_duration_seconds_bucket[1m])))", "legendFormat": "p50 {{type}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le, type) (rate(jobqueue_handler_duration_seconds_bucket[1m])))", "legendFormat": "p95 {{type}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "Time in queue before start (p95)",
+      "description": "From the moment a job could run until a worker started it.",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, queue) (rate(jobqueue_job_wait_seconds_bucket[1m])))", "legendFormat": "{{queue}}" } ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] }
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Failures, timeouts and lost leases (per second)",
+      "gridPos": { "x": 0, "y": 28, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (outcome) (rate(jobqueue_jobs_processed_total{outcome!=\"succeeded\"}[1m]))", "legendFormat": "{{outcome}}" } ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "Recoveries after a worker was lost (last 5 min)",
+      "description": "Jobs the reaper took back because their worker stopped renewing the lease.",
+      "gridPos": { "x": 12, "y": 28, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [ { "refId": "A", "expr": "sum by (result) (increase(jobqueue_reaper_lease_expired_total[5m]))", "legendFormat": "{{result}}" } ]
+    }
+  ]
+}

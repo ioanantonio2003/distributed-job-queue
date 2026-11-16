@@ -1,6 +1,7 @@
 package dev.jobqueue.server.web;
 
 import dev.jobqueue.server.job.InvalidJobException;
+import dev.jobqueue.server.job.InvalidJobStateException;
 import dev.jobqueue.server.job.JobNotFoundException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -27,6 +28,11 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(JobNotFoundException.class)
     ProblemDetail handleNotFound(JobNotFoundException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(InvalidJobStateException.class)
+    ProblemDetail handleInvalidState(InvalidJobStateException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
     }
 
     @ExceptionHandler(InvalidJobException.class)

@@ -11,6 +11,7 @@ import dev.jobqueue.worker.claim.JobClaimRepository;
 import dev.jobqueue.worker.completion.JobCompletionRepository;
 import dev.jobqueue.worker.handler.HandlerRegistry;
 import dev.jobqueue.worker.heartbeat.RunningJobs;
+import dev.jobqueue.worker.metrics.JobMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
@@ -53,6 +54,7 @@ public class JobPoller implements SmartLifecycle {
     private final HandlerRegistry registry;
     private final WorkerProperties properties;
     private final RunningJobs runningJobs;
+    private final JobMetrics metrics;
     private final BackoffCalculator backoff;
     private final List<QueueSlots> queues;
     // Released by every finishing handler, to wake the poller up as soon as a slot is free again.
@@ -65,15 +67,17 @@ public class JobPoller implements SmartLifecycle {
     private volatile boolean running;
     // Set when a shutdown begins; only changes how an interrupted handler is logged.
     private volatile boolean shuttingDown;
+    private volatile boolean draining;
     private Thread pollerThread;
 
     public JobPoller(JobClaimRepository claimRepository, JobCompletionRepository completionRepository,
-            HandlerRegistry registry, WorkerProperties properties, RunningJobs runningJobs) {
+            HandlerRegistry registry, WorkerProperties properties, RunningJobs runningJobs, JobMetrics metrics) {
         this.claimRepository = claimRepository;
         this.completionRepository = completionRepository;
         this.registry = registry;
         this.properties = properties;
         this.runningJobs = runningJobs;
+        this.metrics = metrics;
         this.backoff = new BackoffCalculator(properties.retryBaseDelay(), properties.retryMaxDelay());
         this.queues = properties.queueSlots().entrySet().stream()
                 .map(entry -> new QueueSlots(entry.getKey(), new Semaphore(entry.getValue())))
@@ -113,7 +117,20 @@ public class JobPoller implements SmartLifecycle {
             Thread.currentThread().interrupt();
         }
         pollerThread = null;
-        drain();
+        draining = true; // from here on nothing can be claimed any more
+        try {
+            drain();
+        } finally {
+            draining = false;
+        }
+    }
+
+    /**
+     * True while a shutdown is waiting for running jobs to finish: the poll loop has fully stopped (nothing can be
+     * claimed any more) and the unfinished jobs have not been given back yet.
+     */
+    public boolean isDraining() {
+        return draining;
     }
 
     private void drain() {
@@ -210,9 +227,17 @@ public class JobPoller implements SmartLifecycle {
 
     private void startHandler(ClaimedJob job, QueueSlots queue) {
         JobContext context = new JobContext(job.id(), job.queue(), job.type(), job.attempt(), job.idempotencyKey());
+        metrics.claimed(job);
         FutureTask<Void> handler = new FutureTask<>(() -> {
-            registry.invoke(context, job.payload());
-            return null;
+            long startedAt = System.nanoTime();
+            boolean succeeded = false;
+            try {
+                registry.invoke(context, job.payload());
+                succeeded = true;
+                return null;
+            } finally {
+                metrics.handlerFinished(job, succeeded, Duration.ofNanos(System.nanoTime() - startedAt));
+            }
         });
         // Registered here, by the poller thread itself, the moment the job is claimed: from now on the heartbeat
         // extends its lease and a shutdown knows about it, with no gap in which a claimed job is invisible.
@@ -266,6 +291,7 @@ public class JobPoller implements SmartLifecycle {
                 // The heartbeat found the job is no longer ours: its new owner (or the reaper) decides.
                 log.warn("Job {} ({}) lease lost: attempt {} was cancelled and its result is ignored",
                         job.id(), job.type(), job.attempt());
+                metrics.processed(job.queue(), "lease_lost");
             }
             return;
         } catch (InterruptedException e) {
@@ -284,11 +310,15 @@ public class JobPoller implements SmartLifecycle {
             Optional<JobStatus> status = completionRepository.fail(job.id(), properties.workerId(), job.attempt(),
                     describe(cause), permanent, delay, outcome);
             if (status.isEmpty()) {
+                metrics.processed(job.queue(), "lease_lost");
                 log.warn("Job {} ({}) lease lost: failure of attempt {} ignored", job.id(), job.type(), job.attempt());
             } else if (status.get() == JobStatus.DEAD) {
+                metrics.processed(job.queue(), outcomeLabel(outcome));
+                metrics.dead(job.queue());
                 log.warn("Job {} ({}) is DEAD after attempt {}: {}", job.id(), job.type(), job.attempt(),
                         describe(cause));
             } else {
+                metrics.processed(job.queue(), outcomeLabel(outcome));
                 log.info("Job {} ({}) failed on attempt {}, retry in {}: {}", job.id(), job.type(), job.attempt(),
                         delay, describe(cause));
             }
@@ -296,6 +326,11 @@ public class JobPoller implements SmartLifecycle {
             // The job stays RUNNING; when its lease expires it will be recovered (reaper, later step).
             log.error("Could not record failure of job {}", job.id(), e);
         }
+    }
+
+    // The "outcome" tag of jobqueue.jobs.processed for a failed attempt.
+    private static String outcomeLabel(AttemptOutcome outcome) {
+        return outcome == AttemptOutcome.TIMED_OUT ? "timed_out" : "failed";
     }
 
     // What goes into jobs.last_error: the exception type and message, truncated so one huge message cannot bloat a row.
@@ -309,9 +344,11 @@ public class JobPoller implements SmartLifecycle {
     private void complete(ClaimedJob job) {
         try {
             if (completionRepository.complete(job.id(), properties.workerId(), job.attempt())) {
+                metrics.processed(job.queue(), "succeeded");
                 log.info("Job {} ({}) succeeded on attempt {}", job.id(), job.type(), job.attempt());
             } else {
                 // Fenced out: another worker owns the job now (or it was already finished). Our result is ignored.
+                metrics.processed(job.queue(), "lease_lost");
                 log.warn("Job {} ({}) lease lost: result of attempt {} ignored", job.id(), job.type(), job.attempt());
             }
         } catch (RuntimeException e) {

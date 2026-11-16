@@ -7,6 +7,7 @@ import dev.jobqueue.server.PostgresIntegrationTest;
 import dev.jobqueue.server.reaper.ReaperProperties;
 import dev.jobqueue.server.reaper.ReaperRepository;
 import dev.jobqueue.server.reaper.ReaperService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,7 +63,7 @@ class RandomCrashesIntegrationTest extends PostgresIntegrationTest {
         reaperPool = newPool(2);
         // A background reaper, like the one every server instance runs.
         reaper = new ReaperService(new ReaperRepository(JdbcClient.create(reaperPool)),
-                new ReaperProperties(Duration.ofMillis(200), 100));
+                new ReaperProperties(Duration.ofMillis(200), 100), new SimpleMeterRegistry());
     }
 
     @AfterEach

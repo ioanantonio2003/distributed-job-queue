@@ -1,6 +1,8 @@
 package dev.jobqueue.server.reaper;
 
 import dev.jobqueue.server.reaper.ReaperRepository.ReapResult;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -23,12 +25,14 @@ public class ReaperService implements SmartLifecycle {
 
     private final ReaperRepository repository;
     private final ReaperProperties properties;
+    private final MeterRegistry meterRegistry;
 
     private ScheduledExecutorService scheduler;
 
-    public ReaperService(ReaperRepository repository, ReaperProperties properties) {
+    public ReaperService(ReaperRepository repository, ReaperProperties properties, MeterRegistry meterRegistry) {
         this.repository = repository;
         this.properties = properties;
+        this.meterRegistry = meterRegistry;
     }
 
     @Override
@@ -66,7 +70,20 @@ public class ReaperService implements SmartLifecycle {
             batch = repository.reap(properties.batchSize());
             total = total.plus(batch);
         } while (batch.total() == properties.batchSize());
+        count("requeued", total.requeued());
+        count("dead", total.dead());
         return total;
+    }
+
+    // jobqueue.reaper.lease.expired{result}: how many jobs lost to a dead or cut-off worker were recovered.
+    private void count(String result, int jobs) {
+        if (jobs > 0) {
+            Counter.builder("jobqueue.reaper.lease.expired")
+                    .description("Jobs recovered by the reaper after their worker stopped renewing the lease")
+                    .tag("result", result)
+                    .register(meterRegistry)
+                    .increment(jobs);
+        }
     }
 
     // Never throws: with scheduleWithFixedDelay an exception would silently cancel every later run.

@@ -8,6 +8,7 @@ import dev.jobqueue.server.reaper.ReaperProperties;
 import dev.jobqueue.server.reaper.ReaperRepository;
 import dev.jobqueue.server.reaper.ReaperRepository.ReapResult;
 import dev.jobqueue.server.reaper.ReaperService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -47,7 +48,7 @@ class ReliabilityScenariosIntegrationTest extends PostgresIntegrationTest {
         JDBC.sql("DELETE FROM jobs WHERE status = 'RUNNING'").update();
         reaperPool = newPool(2);
         reaper = new ReaperService(new ReaperRepository(JdbcClient.create(reaperPool)),
-                new ReaperProperties(Duration.ofSeconds(10), 100));
+                new ReaperProperties(Duration.ofSeconds(10), 100), new SimpleMeterRegistry());
     }
 
     @AfterEach
